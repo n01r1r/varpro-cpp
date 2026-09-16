@@ -1,26 +1,87 @@
 # varpro-cpp
 
-Small C++17 variable projection for separable nonlinear least squares.
-One header, one implementation file, and Eigen as the only dependency.
+Small C++17 implementation of variable projection for separable nonlinear
+least-squares problems. The library has one public header, one implementation
+file, and Eigen as its only C++ dependency.
 
-Given a basis matrix `Phi(alpha)` and observations `Y`, the library solves
+## What it does
 
-```text
-minimize || W * (Y - Phi(alpha) * C) ||_F^2
+Many models contain two different kinds of parameters:
+
+- **Nonlinear parameters** change the shape of the basis functions. Examples
+  include decay times, frequencies, or peak locations.
+- **Linear coefficients** only scale and combine those basis functions.
+
+For example, a sum of exponentials can be written as
+
+```math
+y(t) = c_1 e^{-t / \tau_1} + c_2 e^{-t / \tau_2} + c_0.
 ```
 
-It solves the linear coefficients `C` by SVD at each `alpha`, then optimizes
-only `alpha` with Levenberg-Marquardt. One observation column fits one curve;
-several columns perform a global fit with shared nonlinear parameters and
-separate linear coefficients. All columns share the same basis and weights.
+The time constants `tau1` and `tau2` are nonlinear parameters. The
+coefficients `c1`, `c2`, and `c0` are linear parameters.
+
+Variable projection takes advantage of this separation. In matrix form, the
+model is
+
+```math
+Y \approx \Phi(\alpha) C,
+```
+
+where:
+
+| Symbol | Shape | Meaning |
+| --- | --- | --- |
+| `Y` | `m x s` | Observations; each column is one dataset. |
+| `Phi(alpha)` | `m x n` | Basis matrix evaluated at nonlinear parameters `alpha`. |
+| `C` | `n x s` | Linear coefficients; each dataset has its own coefficient column. |
+| `alpha` | `q` | Nonlinear parameters shared by all datasets. |
+
+With optional shared weights `W = diag(w_1, ..., w_m)`, the fitted problem is
+
+```math
+\min_{\alpha, C} \left\| W\left(Y - \Phi(\alpha)C\right) \right\|_F^2.
+```
+
+For a fixed `alpha`, the best `C` is a linear least-squares solve. The
+library computes it with an SVD, then gives only `alpha` to the nonlinear
+optimizer:
+
+```math
+A(\alpha) = W\Phi(\alpha), \qquad B = WY,
+```
+
+```math
+C(\alpha) = \mathop{\arg\min}_C \left\|B - A(\alpha)C\right\|_F^2
+           = A(\alpha)^+B,
+```
+
+```math
+\min_{\alpha} F(\alpha), \qquad
+F(\alpha) = \left\|B - A(\alpha)C(\alpha)\right\|_F^2.
+```
+
+In practical terms, each iteration is:
+
+1. evaluate the basis and its derivatives at a trial `alpha`;
+2. solve the linear coefficients with SVD;
+3. form the weighted residual and an approximate Jacobian;
+4. let Levenberg–Marquardt update only `alpha`.
+
+This is useful when the model is a linear combination of nonlinear basis
+functions and analytical basis derivatives are available. It is not a general
+optimizer for models in which every parameter is nonlinear.
 
 ## Build and run
 
-Requires CMake 3.16+, a C++17 compiler, and Eigen 3.4 including its bundled
-`unsupported` headers. Tested dependency version: Eigen 3.4.0. No Rust compiler,
-BLAS, LAPACK, Python, or additional nonlinear solver library is required.
+Requirements:
 
-With Eigen installed and discoverable by CMake:
+- CMake 3.16 or newer;
+- a C++17 compiler;
+- Eigen 3.4 or newer, including its bundled `unsupported` headers.
+
+No Rust compiler, BLAS, LAPACK, Python, or additional nonlinear-solver
+library is required. With Eigen installed and discoverable by CMake:
 
 ```sh
 cmake -S . -B build
@@ -28,19 +89,11 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Install the library and consume it from another CMake project:
+For a single-configuration generator, add
+`-DCMAKE_BUILD_TYPE=Release` to the configure command.
 
-```sh
-cmake --install build --config Release --prefix /path/to/prefix
-cmake -S consumer -B consumer/build -DCMAKE_PREFIX_PATH=/path/to/prefix
-```
-
-The installed package provides `varpro::varpro`; the consumer must provide an
-Eigen 3.4+ CMake package. For a source-tree consumer, use `add_subdirectory`
-and link the same target directly.
-
-For a single-configuration generator, add `-DCMAKE_BUILD_TYPE=Release` when
-configuring. Alternatively, use a plain Eigen checkout without installing it:
+If Eigen is only available as a source checkout, point CMake at the directory
+that contains both `Eigen/` and `unsupported/`:
 
 ```sh
 git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git build/_deps/eigen-src
@@ -49,83 +102,193 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Run `build/Release/double_exponential.exe` with Visual Studio, or
-`build/double_exponential` with a single-configuration generator. The example
-fits two double-exponential curves and prints the shared time constants,
-each curve's coefficients, and the squared residual error.
+The example fits two double-exponential curves. Run
+`build/Release/double_exponential.exe` with Visual Studio, or
+`build/double_exponential` with a single-configuration generator. It prints
+the shared time constants, the coefficient column for each curve, and the
+squared weighted residual error.
 
-## Use
+## Minimal example
+
+The following example fits one curve to
+
+```math
+y(t) = 3e^{-t/2} + 0.5.
+```
+
+The basis has two columns: the exponential and a constant offset. Its one
+nonlinear parameter is the decay time `alpha[0]`; both basis columns have
+linear coefficients.
 
 ```cpp
 #include <varpro/varpro.hpp>
 #include <cmath>
+#include <stdexcept>
 
 varpro::Vector t = varpro::Vector::LinSpaced(50, 0.0, 10.0);
 varpro::Problem problem;
 problem.observations.resize(t.size(), 1);
-for (Eigen::Index i = 0; i < t.size(); ++i)
-    problem.observations(i, 0) = 3.0 * std::exp(-t[i] / 2.0) + 0.5;
+for (Eigen::Index i = 0; i < t.size(); ++i) {
+    problem.observations(i, 0) =
+        3.0 * std::exp(-t[i] / 2.0) + 0.5;
+}
 
-problem.basis = [t](const varpro::Vector& alpha) -> varpro::Matrix {
+// Return Phi(alpha), an m x n basis matrix.
+problem.basis = [t](const varpro::Vector& alpha) {
     varpro::Matrix phi(t.size(), 2);
     phi.col(0) = (-t.array() / alpha[0]).exp().matrix();
     phi.col(1).setOnes();
     return phi;
 };
-problem.derivative = [t](const varpro::Vector& alpha, Eigen::Index) -> varpro::Matrix {
+
+// Return d Phi / d alpha[k], also an m x n matrix.
+problem.derivative = [t](const varpro::Vector& alpha, Eigen::Index k) {
     varpro::Matrix dphi = varpro::Matrix::Zero(t.size(), 2);
-    dphi.col(0) = ((-t.array() / alpha[0]).exp()
-                  * t.array() / (alpha[0] * alpha[0])).matrix();
+    if (k == 0) {
+        dphi.col(0) =
+            ((-t.array() / alpha[0]).exp()
+             * t.array() / (alpha[0] * alpha[0])).matrix();
+    }
     return dphi;
 };
 
 varpro::Vector initial(1);
 initial << 1.5;
-auto result = varpro::fit(problem, initial);
-// Check result.converged() before using this as a successful fit.
-// result.parameters                  -> approximately [2]
-// result.evaluation.coefficients      -> approximately [3, 0.5]^T
-// result.evaluation.residuals         -> weighted residual matrix
+const varpro::FitResult result = varpro::fit(problem, initial);
+
+if (!result.converged()) {
+    // Inspect result.status and decide whether the fit is usable.
+    throw std::runtime_error("fit did not converge");
+}
+
+// Approximately [2], [3, 0.5]^T, and a near-zero residual for this exact data.
+const varpro::Vector& alpha = result.parameters;
+const varpro::Matrix& coefficients = result.evaluation.coefficients;
+const varpro::Matrix& residuals = result.evaluation.residuals;
 ```
 
-Link the CMake target `varpro::varpro`, or compile `cpp/varpro.cpp` with
-`include/` and the Eigen header directory on your include path. Consumers can
-disable `VARPRO_BUILD_EXAMPLE` and `BUILD_TESTING`.
+The callback contract is intentionally explicit:
 
-`evaluate(problem, alpha)` exposes the linear solution, residuals, approximate
-Jacobian, and numerical rank at a fixed parameter vector. This also allows use
-with another nonlinear optimizer without changing the VarPro calculation.
+- `basis(alpha)` returns the same `m x n` shape for every evaluation;
+- `derivative(alpha, k)` returns the partial derivative
+  `d Phi(alpha) / d alpha[k]` with that same shape. If a transformed parameter
+  is used, this derivative must include the corresponding chain rule;
+- the parameter order in `initial` is the order used by both callbacks.
 
-## Numerical contract
+The library does not impose parameter bounds. For a quantity that must be
+positive, use a transformed parameter in the callback, such as
+`tau = std::exp(log_tau)`, and optimize `log_tau`.
 
-- Matrices use real `double` values. Rows are samples and columns are datasets.
-  The basis and its analytical derivatives must have the same fixed shape.
-- Optional `problem.weights` contains shared, nonnegative residual multipliers.
-  For standard deviations `sigma`, use `1/sigma`. Empty means unit weights.
-- The Jacobian uses the Kaufman approximation, as the Rust implementation does.
-  It is generally not the exact residual derivative away from a perfect fit.
-- Rank-deficient linear problems use a truncated SVD and minimum-norm solution.
-  The same retained singular vectors form the Jacobian projector. This follows
-  the article's range projector and corrects a difference in the checked-out
-  Rust code, which uses all thin-U columns in that projector.
-- Invalid inputs throw `std::invalid_argument`; nonfinite model evaluations or
-  numerical outputs throw `std::domain_error`. Callback exceptions propagate.
-  Invalid trial evaluations abort the fit. Parameter bounds are not provided;
-  positive quantities can be represented by their logarithms in callbacks.
-- `Options` sets the residual evaluation budget and LM `ftol`, `xtol`, `gtol`.
-  `Status` distinguishes convergence, evaluation limit, stalled, and numerical
-  failure. Convergence is a local stopping criterion, not proof of uniqueness.
+## Multiple datasets (multiple right-hand sides)
 
-See [CPP_DESIGN.md](CPP_DESIGN.md) for shapes, formulas, rank cutoff, validation,
-and [verification evidence](CPP_DESIGN.md#verification).
+Store datasets as columns of one matrix:
+
+```cpp
+varpro::Matrix observations(m, number_of_datasets);
+// observations.col(j) is dataset j.
+problem.observations = observations;
+
+const varpro::FitResult result = varpro::fit(problem, initial);
+// result.parameters: q
+// result.evaluation.coefficients: n x number_of_datasets
+// result.evaluation.residuals: m x number_of_datasets
+```
+
+All columns use the same `Phi(alpha)` and therefore share the nonlinear
+parameters. Each column still receives its own linear coefficient vector. The
+fit minimizes the total error over all columns:
+
+```math
+F(\alpha) = \sum_{j=1}^{s}
+\left\|W\left(y_j - \Phi(\alpha)c_j\right)\right\|_2^2.
+```
+
+This lets related curves be fitted globally while allowing their amplitudes or
+offsets to differ.
+
+## Weights
+
+`problem.weights` is an optional vector of `m` shared residual multipliers.
+With standard deviations `sigma`, use inverse standard deviations:
+
+```cpp
+problem.weights = sigma.cwiseInverse();  // 1 / sigma, not 1 / sigma^2
+```
+
+An empty vector means unit weights. Weights must be finite and nonnegative,
+with at least one positive entry. They multiply residuals before the squared
+error is calculated, so the reported `residuals` matrix is
+`W * (Y - Phi * C)`.
+
+## Inspecting an evaluation
+
+Use `evaluate(problem, alpha)` when the nonlinear parameters are supplied by
+another optimizer or when you want to inspect one point without running a
+fit:
+
+```cpp
+const varpro::Evaluation evaluation = varpro::evaluate(problem, alpha);
+
+evaluation.coefficients;  // SVD linear solve, n x s
+evaluation.residuals;     // weighted residuals, m x s
+evaluation.jacobian;       // approximate residual Jacobian, (m * s) x q
+evaluation.rank;           // retained SVD rank
+evaluation.squared_error();// sum of squared residual entries
+```
+
+## Results, errors, and numerical details
+
+`fit` returns the final accepted parameter vector and the corresponding
+coefficients and residuals in one `FitResult`. Check `result.converged()` (or
+inspect `result.status`) before treating a fit as successful. The status is one
+of:
+
+- `converged`: Levenberg–Marquardt met a local stopping criterion;
+- `evaluation_limit`: the residual evaluation budget was exhausted;
+- `stalled`: a stopping tolerance became too small to make progress;
+- `numerical_failure`: the optimizer or a numerical calculation failed.
+
+Convergence is local: it does not establish that the solution is unique or
+globally optimal. `Options` controls the maximum number of evaluations and the
+LM tolerances `ftol`, `xtol`, and `gtol`.
+
+The implementation uses real, double-precision matrices. At each parameter
+evaluation it computes a thin SVD of `W * Phi(alpha)`, truncates numerically
+negligible singular values, and uses the retained subspace for the minimum-norm
+linear solution. Rank-deficient bases are therefore handled explicitly.
+
+The returned Jacobian is the Kaufman approximation used by the reference Rust
+implementation. It is generally not the exact residual derivative when the
+residual is nonzero; this is an intentional part of the numerical contract.
+See [CPP_DESIGN.md](CPP_DESIGN.md) for the precise formula, rank cutoff,
+validation rules, and verification evidence.
+
+Invalid shapes, missing callbacks, nonfinite inputs, negative or all-zero
+weights, and invalid options throw `std::invalid_argument`. Nonfinite model
+values or numerical outputs throw `std::domain_error`. Exceptions raised by a
+callback propagate to the caller; an invalid trial evaluation aborts the fit.
+
+## CMake integration
+
+Install the library and use the exported CMake target:
+
+```sh
+cmake --install build --config Release --prefix /path/to/prefix
+cmake -S consumer -B consumer/build -DCMAKE_PREFIX_PATH=/path/to/prefix
+```
+
+The installed package provides `varpro::varpro`. The consumer must provide an
+Eigen 3.4+ CMake package. For a source-tree consumer, use `add_subdirectory`
+and link the same target directly. Consumers can disable the example and tests
+with `-DVARPRO_BUILD_EXAMPLE=OFF` and `-DBUILD_TESTING=OFF`.
 
 ## Why Eigen stays
 
-Eigen supplies both SVD and the existing LM implementation through its bundled
-`unsupported/Eigen/LevenbergMarquardt` module. Replacing those would add numerical
-code to maintain and verify. There is no evidence here that removing Eigen
-would improve runtime. This implementation prioritizes a small amount of
-readable application code; no speedup over Rust is claimed.
+Eigen supplies both the SVD and the bundled
+`unsupported/Eigen/LevenbergMarquardt` implementation. Keeping those numerical
+building blocks in a maintained dependency makes this port smaller and easier
+to review. No speedup over Rust or equivalence of optimizer trajectories is
+claimed.
 
 ## References and original implementation
 
@@ -137,9 +300,7 @@ readable application code; no speedup over Rust is claimed.
   provenance and the original citations.
 - [Port references and provenance](docs/REFERENCES.md).
 
-The VarPro equations and weighting follow those references. The original Rust
-implementation and its Rust/MATLAB/Python support files were removed from the
-maintained tree; the archived README and links above preserve provenance.
-Eigen's nonlinear optimizer differs from the original `levenberg-marquardt`,
-so iteration counts and optimization trajectories need not match. The original
-MIT license and attribution are retained in [LICENSE](LICENSE).
+The equations and weighting convention follow the references above. The
+maintained tree contains the C++ port only; the archived README and links
+preserve the original project's provenance. The original MIT license and
+attribution are retained in [LICENSE](LICENSE).
