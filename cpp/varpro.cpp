@@ -161,7 +161,8 @@ Matrix form_jacobian(const Problem& problem, const Vector& parameters, Prepared&
             throw std::domain_error("weighted derivative is nonfinite");
 
         Matrix column_matrix;
-        if (s <= q) {
+        // Project after multiplying when the RHS count is no larger than the basis width.
+        if (s <= prepared.n) {
             const Matrix derivative_coefficients = weighted_derivative * prepared.coefficients;
             if (!finite(derivative_coefficients))
                 throw std::domain_error("Jacobian intermediate is nonfinite");
