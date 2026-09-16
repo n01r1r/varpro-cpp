@@ -11,6 +11,8 @@
 namespace {
 
 using varpro::Matrix;
+using varpro::JacobianMode;
+using varpro::LinearOptions;
 using varpro::Problem;
 using varpro::Vector;
 
@@ -96,6 +98,11 @@ void test_single_and_mrhs_fit() {
     Problem p = exponential_problem(t, y);
     auto result = varpro::fit(p, initial);
     check_exp_fit(result, c, "MRHS fit");
+
+    varpro::Options exact_options;
+    exact_options.jacobian_mode = JacobianMode::exact;
+    auto exact_result = varpro::fit(p, initial, exact_options);
+    check_exp_fit(exact_result, c, "exact-Jacobian MRHS fit");
 }
 
 void test_weighting_and_orthogonality() {
@@ -140,48 +147,84 @@ void test_weighting_and_orthogonality() {
                  2e-8, "manual preweight fitted residuals");
 }
 
-void test_jacobians() {
+void check_residual_jacobian(const Problem& problem, const Vector& parameters,
+                             const LinearOptions& linear_options, JacobianMode mode,
+                             double tolerance, const std::string& label) {
+    const auto evaluation = varpro::evaluate(problem, parameters, linear_options, mode);
+    const double h = 1e-6;
+    Matrix fd(evaluation.jacobian.rows(), parameters.size());
+    const Eigen::Index m = problem.observations.rows();
+    const Eigen::Index s = problem.observations.cols();
+    for (Eigen::Index k = 0; k < parameters.size(); ++k) {
+        Vector plus = parameters, minus = parameters;
+        plus(k) += h; minus(k) -= h;
+        Matrix difference = varpro::evaluate(problem, plus, linear_options, mode).residuals -
+                            varpro::evaluate(problem, minus, linear_options, mode).residuals;
+        for (Eigen::Index j = 0; j < s; ++j)
+            fd.col(k).segment(j * m, m) = difference.col(j) / (2.0 * h);
+    }
+    check((fd - evaluation.jacobian).cwiseAbs().maxCoeff() < tolerance, label);
+}
+
+void test_kaufman_jacobians() {
     Vector t(9); for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
     Vector a(2); a << 1.2, 3.7;
     Matrix c(3, 1); c << 2.3, -1.1, .4;
     Problem exact = exponential_problem(t, exp_data(t, a, c));
-    auto e = varpro::evaluate(exact, a);
-    const double h = 1e-6;
-    Matrix fd(t.size(), 2);
-    for (Eigen::Index k = 0; k < 2; ++k) {
-        Vector plus = a, minus = a; plus(k) += h; minus(k) -= h;
-        Matrix difference = varpro::evaluate(exact, plus).residuals -
-                            varpro::evaluate(exact, minus).residuals;
-        fd.col(k) = difference.col(0) / (2.0 * h);
-    }
-    check((fd - e.jacobian).cwiseAbs().maxCoeff() < 3e-7, "zero-residual Jacobian finite difference");
+    const LinearOptions linear_options;
+    check_residual_jacobian(exact, a, linear_options, JacobianMode::kaufman, 3e-7,
+                            "Kaufman zero-residual Jacobian finite difference");
 
     Matrix mrhs_coefficients(3, 3);
     mrhs_coefficients << 2.3, -.7, 1.1, -1.1, 2.0, .3, .4, .6, -.2;
     Problem exact_mrhs = exponential_problem(t, exp_data(t, a, mrhs_coefficients));
-    auto em = varpro::evaluate(exact_mrhs, a);
-    Matrix mrhs_fd(t.size() * 3, 2);
-    for (Eigen::Index k = 0; k < 2; ++k) {
-        Vector plus = a, minus = a; plus(k) += h; minus(k) -= h;
-        Matrix difference = varpro::evaluate(exact_mrhs, plus).residuals -
-                            varpro::evaluate(exact_mrhs, minus).residuals;
-        for (Eigen::Index j = 0; j < 3; ++j)
-            mrhs_fd.col(k).segment(j * t.size(), t.size()) = difference.col(j) / (2.0 * h);
-    }
-    check((mrhs_fd - em.jacobian).cwiseAbs().maxCoeff() < 3e-7,
-          "zero-residual MRHS Jacobian finite difference");
+    check_residual_jacobian(exact_mrhs, a, linear_options, JacobianMode::kaufman, 3e-7,
+                            "Kaufman zero-residual MRHS Jacobian finite difference");
 
     Problem off = exponential_problem(t, exp_data(t, a, c));
     off.observations(3, 0) += .13; off.observations(7, 0) -= .09;
     Vector x(2); x << 1.8, 5.5;
-    auto eo = varpro::evaluate(off, x);
+    auto eo = varpro::evaluate(off, x, linear_options, JacobianMode::kaufman);
+    const double h = 1e-6;
     for (Eigen::Index k = 0; k < 2; ++k) {
         Vector plus = x, minus = x; plus(k) += h; minus(k) -= h;
-        double fd_objective = (varpro::evaluate(off, plus).squared_error() -
-                                varpro::evaluate(off, minus).squared_error()) / (2.0 * h);
+        double fd_objective = (varpro::evaluate(off, plus, linear_options,
+                                                 JacobianMode::kaufman).squared_error() -
+                                varpro::evaluate(off, minus, linear_options,
+                                                 JacobianMode::kaufman).squared_error()) / (2.0 * h);
         double jacobian_objective = 2.0 * eo.residuals.col(0).dot(eo.jacobian.col(k));
-        close(jacobian_objective, fd_objective, 2e-6, "nonzero-residual objective gradient");
+        close(jacobian_objective, fd_objective, 2e-6,
+              "Kaufman nonzero-residual objective gradient");
     }
+}
+
+void test_exact_jacobians() {
+    Vector t(9); for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
+    Vector a(2); a << 1.2, 3.7;
+    Matrix c(3, 1); c << 2.3, -1.1, .4;
+    const LinearOptions linear_options;
+
+    Problem exact = exponential_problem(t, exp_data(t, a, c));
+    check_residual_jacobian(exact, a, linear_options, JacobianMode::exact, 3e-7,
+                            "exact zero-residual Jacobian finite difference");
+
+    Matrix mrhs_coefficients(3, 4);
+    mrhs_coefficients << 2.3, -.7, 1.1, .2,
+                         -1.1, 2.0, .3, -.4,
+                         .4, .6, -.2, 1.7;
+    Problem exact_mrhs = exponential_problem(t, exp_data(t, a, mrhs_coefficients));
+    check_residual_jacobian(exact_mrhs, a, linear_options, JacobianMode::exact, 3e-7,
+                            "exact zero-residual MRHS Jacobian finite difference");
+
+    Problem off = exponential_problem(t, exp_data(t, a, c));
+    off.observations(3, 0) += .13; off.observations(7, 0) -= .09;
+    Vector x(2); x << 1.8, 5.5;
+    const auto exact_evaluation = varpro::evaluate(off, x, JacobianMode::exact);
+    const auto kaufman_evaluation = varpro::evaluate(off, x);
+    check((exact_evaluation.jacobian - kaufman_evaluation.jacobian).norm() > 1e-8,
+          "exact mode changes the nonzero-residual Jacobian");
+    check_residual_jacobian(off, x, linear_options, JacobianMode::exact, 3e-7,
+                            "exact nonzero-residual Jacobian finite difference");
 }
 
 void test_rank_cases() {
@@ -231,6 +274,34 @@ void test_scale_safe_rank_cutoff() {
     close_matrix(e.residuals, Matrix::Zero(2, 1), 1e-12, "large-scale residual");
 }
 
+void test_configurable_rank_cutoff() {
+    Problem p;
+    p.observations.resize(2, 1);
+    p.observations << 0.0, 1.0;
+    p.basis = [](const Vector&) {
+        Matrix b(2, 2);
+        b << 1.0, 0.0, 0.0, 1e-8;
+        return b;
+    };
+    p.derivative = [](const Vector&, Eigen::Index) { return Matrix::Zero(2, 2); };
+    Vector parameters(1); parameters << 1.0;
+
+    const auto automatic = varpro::evaluate(p, parameters);
+    check(automatic.rank == 2, "automatic rank retains small singular value");
+    close(automatic.coefficients(1, 0) * 1e-8, 1.0, 1e-12,
+          "automatic rank solves small singular direction");
+
+    LinearOptions truncated_options;
+    truncated_options.rcond = 1e-6;
+    const auto truncated = varpro::evaluate(p, parameters, truncated_options);
+    check(truncated.rank == 1, "configured rank cutoff truncates small singular value");
+    close_matrix(truncated.coefficients, Matrix::Zero(2, 1), 0.0,
+                 "configured rank cutoff minimum-norm coefficients");
+    Matrix expected_residuals(2, 1); expected_residuals << 0.0, 1.0;
+    close_matrix(truncated.residuals, expected_residuals, 1e-12,
+                 "configured rank cutoff residual");
+}
+
 template <class F> void expect_invalid(F&& f, const std::string& name) {
     try { f(); } catch (const std::invalid_argument&) { return; }
     throw std::runtime_error("expected invalid_argument: " + name);
@@ -272,6 +343,12 @@ void test_errors_and_limit() {
     expect_invalid([&] { varpro::fit(p, a, invalid_options); }, "invalid options");
     invalid_options = {}; invalid_options.ftol = -1.0;
     expect_invalid([&] { varpro::fit(p, a, invalid_options); }, "negative tolerance");
+    invalid_options = {};
+    invalid_options.linear_options.rcond = std::numeric_limits<double>::quiet_NaN();
+    expect_invalid([&] { varpro::fit(p, a, invalid_options); }, "nonfinite rank cutoff");
+    invalid_options = {};
+    invalid_options.jacobian_mode = static_cast<JacobianMode>(99);
+    expect_invalid([&] { varpro::fit(p, a, invalid_options); }, "invalid Jacobian mode");
 
     varpro::Options limited; limited.max_evaluations = 1;
     auto r = varpro::fit(p, a, limited);
@@ -289,9 +366,11 @@ int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"single and MRHS fit", test_single_and_mrhs_fit},
         {"weighting and orthogonality", test_weighting_and_orthogonality},
-        {"Kaufman Jacobians", test_jacobians},
+        {"Kaufman Jacobians", test_kaufman_jacobians},
+        {"exact Jacobians", test_exact_jacobians},
         {"rank deficient and rank zero", test_rank_cases},
         {"scale-safe rank cutoff", test_scale_safe_rank_cutoff},
+        {"configurable rank cutoff", test_configurable_rank_cutoff},
         {"errors and evaluation limit", test_errors_and_limit},
     };
     int failures = 0;

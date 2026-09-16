@@ -16,15 +16,23 @@ struct Problem {
     Vector weights; // Empty = identity; otherwise shared residual multipliers (1/sigma).
 };
 
+enum class JacobianMode { kaufman, exact };
+
+struct LinearOptions {
+    double rcond = -1.0; // < 0 = automatic max(m, n) * epsilon cutoff.
+};
+
 struct Evaluation {
     Matrix coefficients;
     Matrix residuals; // Weighted residuals, one column per dataset.
-    Matrix jacobian;  // Kaufman approximation; residual columns stacked vertically.
+    Matrix jacobian;  // Selected residual Jacobian; columns stack datasets vertically.
     Eigen::Index rank = 0;
     double squared_error() const { return residuals.squaredNorm(); }
 };
 
 struct Options {
+    JacobianMode jacobian_mode = JacobianMode::kaufman;
+    LinearOptions linear_options;
     int max_evaluations = 1000;
     double ftol = 1e-12;
     double xtol = 1e-12;
@@ -43,8 +51,12 @@ struct FitResult {
 };
 
 // Invalid contracts throw invalid_argument; nonfinite evaluations throw domain_error.
-// See CPP_DESIGN.md for dimensions, rank cutoff, and the approximate Jacobian.
-Evaluation evaluate(const Problem& problem, const Vector& parameters);
+// See CPP_DESIGN.md for dimensions, rank cutoff, and the Jacobian formulas.
+Evaluation evaluate(const Problem& problem, const Vector& parameters,
+                    const LinearOptions& linear_options = {},
+                    JacobianMode jacobian_mode = JacobianMode::kaufman);
+Evaluation evaluate(const Problem& problem, const Vector& parameters,
+                    JacobianMode jacobian_mode);
 FitResult fit(const Problem& problem, Vector initial_parameters,
               const Options& options = {});
 

@@ -37,39 +37,63 @@ matrix callbacks, `evaluate`, and `fit`. Do not add a generic backend layer.
   are NOT squared-error multipliers: pass 1/sigma, not 1/sigma^2.
 - `coefficients`: n x s, unconstrained real linear coefficients.
 - `residuals`: m x s, W * (Y - Phi * C), in weighted observation units.
-- `jacobian`: (m*s) x q, stacked by dataset/column, Kaufman approximation.
+- `jacobian`: (m*s) x q, stacked by dataset/column, using the selected Kaufman
+  or exact residual-Jacobian mode.
 - Objective: sum of all squared weighted residual entries, without averaging.
   `fit` additionally needs m*s >= q for Eigen's LM.
 
-For A = W*Phi and B = W*Y, compute one thin SVD per parameter evaluation.
-Retain singular values strictly greater than
+For A = W*Phi and B = W*Y, compute one SVD per parameter evaluation and retain
+its numerical-rank compact factors:
+
+    A ~= U_r * Sigma_r * V_r^T, where r = numerical rank.
+
+By default, retain singular values strictly greater than
 `sigma_max * max(m,n) * epsilon(double)`, matching Rust's coefficient cutoff.
-Use retained U_r, V_r, sigma_r to compute minimum-norm C = A^+ B and R = B-A*C.
+`LinearOptions::rcond < 0` selects that automatic relative cutoff; otherwise
+retain exactly those singular values satisfying `sigma_i > rcond*sigma_max`.
+Use the same retained U_r, V_r, sigma_r for the minimum-norm C = A^+ B,
+the residual R = B-A*C, and the range projector.
 For D_k = W*dPhi/dalpha_k:
 
     J[:,k] = vec(U_r * (U_r^T * (D_k*C)) - D_k*C).
 
+This is the Kaufman approximation. Exact mode adds the coefficient response
+without building a pseudoinverse:
+
+    J_exact[:,k] = J_K[:,k]
+                    - vec(U_r * Sigma_r^-1 * V_r^T * D_k^T * R).
+
+The minus sign follows the documented residual convention `R = B-A*C`; it is
+also the sign required by direct residual finite differences. `fit` selects the
+mode with `Options::jacobian_mode`, while `evaluate` defaults to Kaufman and
+accepts an explicit mode.
+
 Never build an m x m projector, explicit pseudoinverse, or a block matrix with
 one basis per dataset. Reuse the SVD between residual and Jacobian callbacks.
 Reassociate `(U_r*(U_r^T*D_k)-D_k)*C` when s > q, as the Rust code does.
+For `fit`, compute the constant weighted observations `B = W*Y` once on entry
+and reuse them across nonlinear evaluations.
 
-The Jacobian omits Part 1's b_k term, as the Rust implementation does. At nonzero
-residual it is generally NOT the exact residual derivative; compare objective
-gradients there, and compare residual finite differences at zero residual.
+The Jacobian omits Part 1's b_k term, as the Rust implementation does. Kaufman
+is generally NOT the exact residual derivative at nonzero residual. The exact
+mode can be checked directly against residual finite differences there.
 
 ### Rank clarification
 
 Rust thresholds singular values when solving C but uses all thin U columns in
 the Jacobian projector. For a deficient basis those columns can include null
 directions. C++ follows Part 1's range projector by using only retained columns
-consistently. Full-rank formulas agree. Derivatives at rank transitions need not
-exist. Rank zero is allowed for evaluation and produces C=0 and J=0; it does not
-prove model identifiability or a useful optimum.
+consistently. Full-rank formulas agree. The reduced residual is smooth only
+while the numerical rank remains locally constant; derivatives may become
+discontinuous at rank transitions. Rank zero is allowed for evaluation and
+produces C=0 and J=0; it does not prove model identifiability or a useful
+optimum.
 
 ## Invalid cases and termination
 
 Reject missing callbacks, invalid shapes, nonfinite parameters/data/weights,
-negative/all-zero weights, and invalid options with `std::invalid_argument`.
+negative/all-zero weights, nonfinite `rcond`, invalid Jacobian modes, and other
+invalid options with `std::invalid_argument`.
 Reject nonfinite model values, derivatives, linear solutions, residuals, Jacobian,
 or overflowed squared error with `std::domain_error`. Callback exceptions
 propagate. An invalid trial aborts the fit; it is never silently discarded or
@@ -86,11 +110,13 @@ iteration counts, and bitwise results need not match.
 
 Build with CMake and run CTest in Release. Deterministic cases must exercise:
 single and multiple RHS recovery; weighted fit and manual preweighting
-equivalence; residual orthogonality; Jacobian zero-residual finite differences
-and nonzero-residual objective gradient; rank-deficient minimum-norm solve and
-range projector; rank zero; invalid inputs/model outputs; evaluation-limit
-non-success and final-point consistency. Assertions must remain active in
-Release. Run the documented example and inspect its actual output.
+equivalence; residual orthogonality; Kaufman zero-residual finite differences
+and nonzero-residual objective gradient; exact zero- and nonzero-residual
+finite-difference Jacobians; rank-deficient minimum-norm solve and range
+projector; rank zero; automatic and configurable rank cutoffs; invalid
+inputs/model outputs; evaluation-limit non-success and final-point
+consistency. Assertions must remain active in Release. Run the documented
+example and inspect its actual output.
 
 Record actual compiler/Eigen versions, commands, and results after verification.
 Tests verify implementation contracts, not scientific validation or speed.
@@ -109,22 +135,28 @@ PowerShell lines normalized them for configuration and build:
 $varproBuildPath = $env:PATH
 Remove-Item Env:PATH
 $env:Path = $varproBuildPath
-cmake -S . -B build-msvc -G 'Visual Studio 17 2022' -A x64 -DEIGEN3_INCLUDE_DIR=C:/workspace/varpro-cpp/build/_deps/eigen-src
-cmake --build build-msvc --config Release --parallel 2
-ctest --test-dir build-msvc -C Release --output-on-failure
-.\build-msvc\Release\double_exponential.exe
+cmake -S . -B build-check -DBUILD_TESTING=ON -DVARPRO_BUILD_EXAMPLE=ON -DEIGEN3_INCLUDE_DIR=C:/workspace/varpro-cpp/build-check/eigen-src
+cmake --build build-check --config Release --parallel 2
+ctest --test-dir build-check -C Release --output-on-failure
+.\build-check\Release\double_exponential.exe
 ```
 
-Verified on 2026-09-16: Release library, test runner, and example built
-successfully. CTest passed 1/1 executable, containing six passing groups:
+Verified on 2026-09-16 after adding exact Jacobian selection, configurable
+numerical-rank cutoff, and cached weighted observations: Release library,
+test runner, and example built successfully. CTest passed 1/1 executable,
+containing eight passing groups:
 
 - Single RHS and three-RHS recovery.
 - Weighted residual orthogonality, manual preweight equivalence of evaluations
   and completed fits.
-- Zero-residual finite differences for single and three-RHS Jacobians, plus a
-  nonzero-residual objective-gradient check.
+- Kaufman zero-residual finite differences for single and three-RHS Jacobians,
+  plus a nonzero-residual objective-gradient check.
+- Exact zero-residual and nonzero-residual residual-Jacobian finite differences,
+  plus exact-Jacobian MRHS fitting.
 - Rank-deficient minimum-norm solve/range projector and rank-zero behavior.
 - Finite extreme-scale SVD cutoff (`sigma_max = 1e308`).
+- Configurable relative rank cutoff retaining or truncating a near-null
+  singular direction.
 - Invalid inputs/evaluations and a strict one-call budget at a nonstationary
   initial point, with consistent final parameters, coefficients, and residuals.
 

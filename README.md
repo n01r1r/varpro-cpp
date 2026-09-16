@@ -44,8 +44,8 @@ With optional shared weights `W = diag(w_1, ..., w_m)`, the fitted problem is
 ```
 
 For a fixed `alpha`, the best `C` is a linear least-squares solve. The
-library computes it with an SVD, then gives only `alpha` to the nonlinear
-optimizer:
+library computes it with a numerical-rank compact SVD, then gives only
+`alpha` to the nonlinear optimizer:
 
 ```math
 A(\alpha) = W\Phi(\alpha), \qquad B = WY,
@@ -54,6 +54,21 @@ A(\alpha) = W\Phi(\alpha), \qquad B = WY,
 ```math
 C(\alpha) = \mathop{\arg\min}_C \left\|B - A(\alpha)C\right\|_F^2
            = A(\alpha)^+B,
+```
+
+The retained decomposition is
+
+```math
+A(\alpha) \approx U_r\Sigma_rV_r^\top,
+\qquad r = \text{numerical rank},
+```
+
+and the same retained rank is used for the minimum-norm solve and the range
+projector:
+
+```math
+A^+ = V_r\Sigma_r^{-1}U_r^\top,
+\qquad P_A^\perp = I - U_rU_r^\top.
 ```
 
 ```math
@@ -65,12 +80,36 @@ In practical terms, each iteration is:
 
 1. evaluate the basis and its derivatives at a trial `alpha`;
 2. solve the linear coefficients with SVD;
-3. form the weighted residual and an approximate Jacobian;
+3. form the weighted residual and the selected residual Jacobian;
 4. let Levenberg–Marquardt update only `alpha`.
 
 This is useful when the model is a linear combination of nonlinear basis
 functions and analytical basis derivatives are available. It is not a general
 optimizer for models in which every parameter is nonlinear.
+
+## Jacobian modes
+
+The default `JacobianMode::kaufman` uses the compact-SVD Kaufman approximation.
+For a residual `R = B - A*C`, `JacobianMode::exact` adds the linear-coefficient
+response without constructing a pseudoinverse:
+
+```math
+J_k^{\text{exact}} = -P_A^\perp D_kC
+ - U_r\Sigma_r^{-1}V_r^\top D_k^\top R.
+```
+
+The minus sign in the second term follows the library's `B - A*C` residual
+convention. The exact mode can be selected for an evaluation or a fit:
+
+```cpp
+const auto evaluation = varpro::evaluate(problem, alpha,
+                                         varpro::JacobianMode::exact);
+
+varpro::Options options;
+options.jacobian_mode = varpro::JacobianMode::exact;
+options.linear_options.rcond = 1e-10;  // < 0 keeps the automatic cutoff.
+const auto result = varpro::fit(problem, initial, options);
+```
 
 ## Build and run
 
@@ -231,7 +270,7 @@ const varpro::Evaluation evaluation = varpro::evaluate(problem, alpha);
 
 evaluation.coefficients;  // SVD linear solve, n x s
 evaluation.residuals;     // weighted residuals, m x s
-evaluation.jacobian;       // approximate residual Jacobian, (m * s) x q
+evaluation.jacobian;       // selected residual Jacobian, (m * s) x q
 evaluation.rank;           // retained SVD rank
 evaluation.squared_error();// sum of squared residual entries
 ```
@@ -253,20 +292,56 @@ globally optimal. `Options` controls the maximum number of evaluations and the
 LM tolerances `ftol`, `xtol`, and `gtol`.
 
 The implementation uses real, double-precision matrices. At each parameter
-evaluation it computes a thin SVD of `W * Phi(alpha)`, truncates numerically
-negligible singular values, and uses the retained subspace for the minimum-norm
-linear solution. Rank-deficient bases are therefore handled explicitly.
+evaluation it computes a numerical-rank compact SVD of `W * Phi(alpha)`,
+truncates singular values according to `sigma_i > rcond * sigma_max`, and uses
+the retained subspace for the minimum-norm linear solution and projector.
+`LinearOptions::rcond < 0` selects the automatic default
+`max(m, n) * epsilon`; a nonnegative value makes the numerical rank an explicit
+modeling choice.
 
-The returned Jacobian is the Kaufman approximation used by the reference Rust
-implementation. It is generally not the exact residual derivative when the
-residual is nonzero; this is an intentional part of the numerical contract.
-See [CPP_DESIGN.md](CPP_DESIGN.md) for the precise formula, rank cutoff,
-validation rules, and verification evidence.
+The returned Jacobian uses `Options::jacobian_mode` for `fit`, and Kaufman is
+the default for `evaluate`. Kaufman is generally not the exact residual
+derivative when the residual is nonzero. The exact mode is tested directly
+against residual finite differences at nonzero residuals. Derivatives may be
+discontinuous where the numerical rank changes. See
+[CPP_DESIGN.md](CPP_DESIGN.md) for the precise formulas, cutoff, validation
+rules, and verification evidence.
 
 Invalid shapes, missing callbacks, nonfinite inputs, negative or all-zero
 weights, and invalid options throw `std::invalid_argument`. Nonfinite model
 values or numerical outputs throw `std::domain_error`. Exceptions raised by a
 callback propagate to the caller; an invalid trial evaluation aborts the fit.
+
+Linear coefficients are unconstrained. Nonnegative coefficients, NNLS, and
+linear coefficient bounds are not supported by this compact VarPro API. A
+Tikhonov penalty can be represented without a new solver by augmenting the
+linear system. For a fixed `L` with `p` rows, use `[A; lambda * L]` and
+`[B; 0]` in the callbacks (and append zero derivative rows):
+
+```cpp
+const Eigen::Index m = problem.observations.rows();
+const Eigen::Index p = L.rows();
+const Eigen::Index n = L.cols();
+varpro::Problem augmented = problem;
+augmented.observations.conservativeResize(m + p, problem.observations.cols());
+augmented.observations.bottomRows(p).setZero();
+augmented.basis = [base = problem.basis, L, lambda, m, p](const varpro::Vector& x) {
+    varpro::Matrix result(m + p, L.cols());
+    result.topRows(m) = base(x);
+    result.bottomRows(p) = lambda * L;
+    return result;
+};
+augmented.derivative = [base = problem.derivative, m, p, n](const varpro::Vector& x,
+                                                            Eigen::Index k) {
+    varpro::Matrix result = varpro::Matrix::Zero(m + p, n);
+    result.topRows(m) = base(x, k);
+    return result;
+};
+```
+
+The augmentation example assumes an unweighted or already preweighted
+`problem`; shared observation weights should be incorporated consistently into
+the top block before appending the penalty rows.
 
 ## CMake integration
 

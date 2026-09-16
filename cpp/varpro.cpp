@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -50,6 +50,16 @@ void validate_inputs(const Problem& problem, const Vector& parameters) {
     }
 }
 
+void validate_linear_options(const LinearOptions& options) {
+    if (!std::isfinite(options.rcond))
+        throw std::invalid_argument("rcond must be finite");
+}
+
+void validate_jacobian_mode(JacobianMode mode) {
+    if (mode != JacobianMode::kaufman && mode != JacobianMode::exact)
+        throw std::invalid_argument("invalid Jacobian mode");
+}
+
 Index stacked_size(Index rows, Index columns) {
     const Index maximum = (std::numeric_limits<Index>::max)();
     if (rows <= 0 || columns <= 0 || rows > maximum / columns)
@@ -66,18 +76,30 @@ Matrix apply_weights(const Matrix& matrix, const Vector& weights) {
     return weighted;
 }
 
+Matrix make_weighted_observations(const Problem& problem) {
+    Matrix weighted = apply_weights(problem.observations, problem.weights);
+    if (!finite(weighted))
+        throw std::domain_error("weighted observations are nonfinite");
+    return weighted;
+}
+
 struct Prepared {
     Index n = 0;
     Index rank = 0;
     Matrix coefficients;
     Matrix residuals;
     Matrix retained_u;
+    Matrix retained_v;
+    Vector retained_sigma;
     Matrix jacobian;
     bool has_jacobian = false;
 };
 
-Prepared prepare(const Problem& problem, const Vector& parameters, Index expected_n = 0) {
+Prepared prepare(const Problem& problem, const Vector& parameters,
+                 const LinearOptions& linear_options, Index expected_n = 0,
+                 const Matrix* cached_weighted_observations = nullptr) {
     validate_inputs(problem, parameters);
+    validate_linear_options(linear_options);
 
     const Index m = problem.observations.rows();
     const Index s = problem.observations.cols();
@@ -91,8 +113,16 @@ Prepared prepare(const Problem& problem, const Vector& parameters, Index expecte
 
     const Index n = basis.cols();
     const Matrix weighted_basis = apply_weights(basis, problem.weights);
-    const Matrix weighted_observations = apply_weights(problem.observations, problem.weights);
-    if (!finite(weighted_basis) || !finite(weighted_observations))
+    Matrix computed_weighted_observations;
+    const Matrix* weighted_observations = cached_weighted_observations;
+    if (weighted_observations == nullptr) {
+        computed_weighted_observations = make_weighted_observations(problem);
+        weighted_observations = &computed_weighted_observations;
+    }
+    if (weighted_observations->rows() != m || weighted_observations->cols() != s ||
+        !finite(*weighted_observations))
+        throw std::domain_error("weighted observations are nonfinite or have invalid shape");
+    if (!finite(weighted_basis))
         throw std::domain_error("weighted model values are nonfinite");
 
     Eigen::JacobiSVD<Matrix> svd(
@@ -102,12 +132,12 @@ Prepared prepare(const Problem& problem, const Vector& parameters, Index expecte
         throw std::domain_error("SVD returned nonfinite singular values");
 
     const double sigma_max = singular_values.maxCoeff();
-    const double cutoff = sigma_max *
-        (static_cast<double>((std::max)(m, n)) *
-         std::numeric_limits<double>::epsilon());
+    const double relative_cutoff = linear_options.rcond < 0.0
+        ? static_cast<double>((std::max)(m, n)) * std::numeric_limits<double>::epsilon()
+        : linear_options.rcond;
     Index rank = 0;
     for (Index i = 0; i < singular_values.size(); ++i)
-        if (singular_values(i) > cutoff)
+        if (sigma_max > 0.0 && singular_values(i) / sigma_max > relative_cutoff)
             ++rank;
 
     Prepared result;
@@ -115,26 +145,29 @@ Prepared prepare(const Problem& problem, const Vector& parameters, Index expecte
     result.rank = rank;
     result.coefficients = Matrix::Zero(n, s);
     result.retained_u = Matrix(m, rank);
+    result.retained_v = Matrix(n, rank);
+    result.retained_sigma = Vector(rank);
     if (rank != 0) {
         result.retained_u = svd.matrixU().leftCols(rank);
-        const Matrix retained_v = svd.matrixV().leftCols(rank);
-        const Vector retained_sigma = singular_values.head(rank);
-        if (!finite(result.retained_u) || !finite(retained_v))
+        result.retained_v = svd.matrixV().leftCols(rank);
+        result.retained_sigma = singular_values.head(rank);
+        if (!finite(result.retained_u) || !finite(result.retained_v) ||
+            !finite(result.retained_sigma))
             throw std::domain_error("SVD returned nonfinite singular vectors");
 
-        Matrix projected_rhs = result.retained_u.transpose() * weighted_observations;
+        Matrix projected_rhs = result.retained_u.transpose() * *weighted_observations;
         if (!finite(projected_rhs))
             throw std::domain_error("linear solve produced nonfinite values");
         for (Index i = 0; i < rank; ++i)
-            projected_rhs.row(i) /= retained_sigma(i);
+            projected_rhs.row(i) /= result.retained_sigma(i);
         if (!finite(projected_rhs))
             throw std::domain_error("linear solve produced nonfinite values");
-        result.coefficients.noalias() = retained_v * projected_rhs;
+        result.coefficients.noalias() = result.retained_v * projected_rhs;
     }
     if (!finite(result.coefficients))
         throw std::domain_error("linear solve produced nonfinite coefficients");
 
-    result.residuals = weighted_observations - weighted_basis * result.coefficients;
+    result.residuals = *weighted_observations - weighted_basis * result.coefficients;
     if (!finite(result.residuals))
         throw std::domain_error("residuals are nonfinite");
     const double squared_error = result.residuals.squaredNorm();
@@ -143,7 +176,9 @@ Prepared prepare(const Problem& problem, const Vector& parameters, Index expecte
     return result;
 }
 
-Matrix form_jacobian(const Problem& problem, const Vector& parameters, Prepared& prepared) {
+Matrix form_jacobian(const Problem& problem, const Vector& parameters, Prepared& prepared,
+                     JacobianMode jacobian_mode) {
+    validate_jacobian_mode(jacobian_mode);
     const Index m = problem.observations.rows();
     const Index s = problem.observations.cols();
     const Index q = parameters.size();
@@ -176,6 +211,21 @@ Matrix form_jacobian(const Problem& problem, const Vector& parameters, Prepared&
                 throw std::domain_error("Jacobian intermediate is nonfinite");
             column_matrix = projected_derivative * prepared.coefficients;
         }
+        if (jacobian_mode == JacobianMode::exact && prepared.rank != 0) {
+            Matrix correction = weighted_derivative.transpose() * prepared.residuals;
+            if (!finite(correction))
+                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+            correction = prepared.retained_v.transpose() * correction;
+            if (!finite(correction))
+                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+            for (Index i = 0; i < prepared.rank; ++i)
+                correction.row(i) /= prepared.retained_sigma(i);
+            if (!finite(correction))
+                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+            // R = B - A*C, so differentiating the normal equation contributes
+            // the negative pseudoinverse-transpose term.
+            column_matrix.noalias() -= prepared.retained_u * correction;
+        }
         if (!finite(column_matrix))
             throw std::domain_error("Jacobian is nonfinite");
         for (Index j = 0; j < s; ++j)
@@ -191,9 +241,10 @@ bool same_vector(const Vector& left, const Vector& right) {
 
 class FitFunctor final : public Eigen::DenseFunctor<double> {
 public:
-    FitFunctor(const Problem& problem, const Options& options, int inputs, int values)
+    FitFunctor(const Problem& problem, const Options& options, int inputs, int values,
+               Matrix weighted_observations)
         : Eigen::DenseFunctor<double>(inputs, values), problem_(problem), options_(options),
-          parameter_count_(inputs) {}
+          parameter_count_(inputs), weighted_observations_(std::move(weighted_observations)) {}
 
     int operator()(const InputType& parameters, ValueType& residuals) {
         if (function_evaluations_ >= options_.max_evaluations) {
@@ -209,11 +260,7 @@ public:
     }
 
     int df(const InputType& parameters, JacobianType& jacobian) {
-        Prepared& current = prepared_for(parameters);
-        if (!current.has_jacobian) {
-            current.jacobian = form_jacobian(problem_, parameters, current);
-            current.has_jacobian = true;
-        }
+        Prepared& current = prepared_with_jacobian(parameters);
         jacobian = current.jacobian;
         return 0;
     }
@@ -222,29 +269,51 @@ public:
     bool budget_exhausted() const { return budget_exhausted_; }
     Index basis_columns() const { return expected_n_; }
 
+    Evaluation evaluation_for(const Vector& parameters) {
+        Prepared& current = prepared_with_jacobian(parameters);
+        Evaluation result;
+        result.coefficients = current.coefficients;
+        result.residuals = current.residuals;
+        result.jacobian = current.jacobian;
+        result.rank = current.rank;
+        return result;
+    }
+
 private:
+    Prepared& prepared_with_jacobian(const Vector& parameters) {
+        Prepared& current = prepared_for(parameters);
+        if (!current.has_jacobian) {
+            current.jacobian = form_jacobian(problem_, parameters, current,
+                                             options_.jacobian_mode);
+            current.has_jacobian = true;
+        }
+        return current;
+    }
+
     Prepared& prepared_for(const Vector& parameters) {
         if (parameters.size() != parameter_count_)
             throw std::invalid_argument("parameter count changed during fit");
         if (cached_ && same_vector(cached_parameters_, parameters))
             return *cached_;
 
-        Prepared fresh = prepare(problem_, parameters, expected_n_);
+        Prepared fresh = prepare(problem_, parameters, options_.linear_options, expected_n_,
+                                 &weighted_observations_);
         if (expected_n_ == 0)
             expected_n_ = fresh.n;
         cached_parameters_ = parameters;
-        cached_ = std::make_unique<Prepared>(std::move(fresh));
+        cached_ = std::move(fresh);
         return *cached_;
     }
 
     const Problem& problem_;
     const Options& options_;
     const Index parameter_count_;
+    Matrix weighted_observations_;
     Index expected_n_ = 0;
     int function_evaluations_ = 0;
     bool budget_exhausted_ = false;
     Vector cached_parameters_;
-    std::unique_ptr<Prepared> cached_;
+    std::optional<Prepared> cached_;
 };
 
 Status map_status(Eigen::LevenbergMarquardtSpace::Status status, bool budget_exhausted) {
@@ -268,9 +337,11 @@ Status map_status(Eigen::LevenbergMarquardtSpace::Status status, bool budget_exh
 
 } // namespace
 
-Evaluation evaluate(const Problem& problem, const Vector& parameters) {
-    Prepared prepared = prepare(problem, parameters);
-    Matrix jacobian = form_jacobian(problem, parameters, prepared);
+Evaluation evaluate(const Problem& problem, const Vector& parameters,
+                    const LinearOptions& linear_options, JacobianMode jacobian_mode) {
+    validate_jacobian_mode(jacobian_mode);
+    Prepared prepared = prepare(problem, parameters, linear_options);
+    Matrix jacobian = form_jacobian(problem, parameters, prepared, jacobian_mode);
     Evaluation result;
     result.coefficients = std::move(prepared.coefficients);
     result.residuals = std::move(prepared.residuals);
@@ -279,8 +350,15 @@ Evaluation evaluate(const Problem& problem, const Vector& parameters) {
     return result;
 }
 
+Evaluation evaluate(const Problem& problem, const Vector& parameters,
+                    JacobianMode jacobian_mode) {
+    return evaluate(problem, parameters, LinearOptions{}, jacobian_mode);
+}
+
 FitResult fit(const Problem& problem, Vector initial_parameters, const Options& options) {
     validate_inputs(problem, initial_parameters);
+    validate_jacobian_mode(options.jacobian_mode);
+    validate_linear_options(options.linear_options);
     if (options.max_evaluations <= 0 || !std::isfinite(options.ftol) ||
         !std::isfinite(options.xtol) || !std::isfinite(options.gtol) ||
         options.ftol < 0.0 || options.xtol < 0.0 || options.gtol < 0.0)
@@ -292,7 +370,9 @@ FitResult fit(const Problem& problem, Vector initial_parameters, const Options& 
     if (q > int_max || stacked > int_max || stacked < q)
         throw std::invalid_argument("fit dimensions are incompatible with Eigen LM");
 
-    FitFunctor functor(problem, options, static_cast<int>(q), static_cast<int>(stacked));
+    Matrix weighted_observations = make_weighted_observations(problem);
+    FitFunctor functor(problem, options, static_cast<int>(q), static_cast<int>(stacked),
+                       std::move(weighted_observations));
     Eigen::LevenbergMarquardt<FitFunctor> solver(functor);
     solver.setMaxfev(options.max_evaluations);
     solver.setFtol(options.ftol);
@@ -303,7 +383,7 @@ FitResult fit(const Problem& problem, Vector initial_parameters, const Options& 
 
     FitResult result;
     result.parameters = parameters;
-    result.evaluation = evaluate(problem, parameters);
+    result.evaluation = functor.evaluation_for(parameters);
     if (functor.basis_columns() != 0 &&
         result.evaluation.coefficients.rows() != functor.basis_columns())
         throw std::invalid_argument("basis column count changed during fit");
