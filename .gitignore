@@ -17,3 +17,12 @@ lcov.info
 
 # Locally checked-out Eigen headers used by the documented source build.
 /third_party/eigen/
+
+# Agent and environment-local files.
+/.agents/
+/.codex/
+/.work/
+/pptx_work/
+/AGENTS.md
+/.env
+/.env.*
