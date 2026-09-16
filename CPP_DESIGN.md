@@ -68,6 +68,15 @@ also the sign required by direct residual finite differences. `fit` selects the
 mode with `Options::jacobian_mode`, while `evaluate` defaults to Kaufman and
 accepts an explicit mode.
 
+`JacobianMode::exact` is exact for the full VarPro formula at a locally
+constant retained rank when discarded singular directions are treated as null.
+It is not a promise of the derivative of the implemented re-truncated residual
+map when an explicit `rcond` discards a nonzero singular value. In that case,
+the retained singular subspace can rotate according to the discarded singular
+value, while the compact retained-SVD formula intentionally does not model
+that dependence. Numerical rank staying constant is therefore not sufficient
+for a finite-difference match.
+
 Never build an m x m projector, explicit pseudoinverse, or a block matrix with
 one basis per dataset. Reuse the SVD between residual and Jacobian callbacks.
 Reassociate `(U_r*(U_r^T*D_k)-D_k)*C` when s > q, as the Rust code does.
@@ -76,7 +85,9 @@ and reuse them across nonlinear evaluations.
 
 The Jacobian omits Part 1's b_k term, as the Rust implementation does. Kaufman
 is generally NOT the exact residual derivative at nonzero residual. The exact
-mode can be checked directly against residual finite differences there.
+mode can be checked directly against residual finite differences there when no
+nonzero singular direction is truncated; explicit truncation follows the
+contract above.
 
 ### Rank clarification
 
@@ -112,7 +123,8 @@ Build with CMake and run CTest in Release. Deterministic cases must exercise:
 single and multiple RHS recovery; weighted fit and manual preweighting
 equivalence; residual orthogonality; Kaufman zero-residual finite differences
 and nonzero-residual objective gradient; exact zero- and nonzero-residual
-finite-difference Jacobians; rank-deficient minimum-norm solve and range
+finite-difference Jacobians; explicit truncated rotating-subspace mismatch;
+rank-deficient minimum-norm solve and range
 projector; rank zero; automatic and configurable rank cutoffs; invalid
 inputs/model outputs; evaluation-limit non-success and final-point
 consistency. Assertions must remain active in Release. Run the documented
@@ -159,6 +171,17 @@ containing eight passing groups:
   singular direction.
 - Invalid inputs/evaluations and a strict one-call budget at a nonstationary
   initial point, with consistent final parameters, coefficients, and residuals.
+
+Additional verification on 2026-09-17 used the same MSVC 19.44.35223.0,
+CMake 4.2.0-rc1, and Eigen 3.4.0 configuration after adding the explicit
+truncated rotating-subspace case. The Release library, test runner, and
+example built successfully; CTest passed 1/1, and the direct runner passed all
+nine groups. With `epsilon = 1e-3`, `rcond = 1e-2`, and observations
+`[0.7, -1.2]^T`, the test observed a residual finite-difference Jacobian of
+`[1.2, -0.7]^T` while `JacobianMode::exact` returned
+`(1 - epsilon) * [1.2, -0.7]^T`; the maximum mismatch was above `1e-4`.
+This fixes the documented exact-mode contract rather than claiming a
+derivative for the re-truncated residual map.
 
 The example exited successfully with:
 

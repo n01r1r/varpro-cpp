@@ -302,6 +302,67 @@ void test_configurable_rank_cutoff() {
                  "configured rank cutoff residual");
 }
 
+void test_exact_jacobian_with_truncated_rotating_subspace() {
+    const double epsilon = 1e-3;
+    Problem p;
+    p.observations.resize(2, 1);
+    p.observations << .7, -1.2;
+    p.basis = [epsilon](const Vector& parameters) {
+        const double c = std::cos(parameters(0));
+        const double s = std::sin(parameters(0));
+        Matrix rotation(2, 2);
+        rotation << c, -s, s, c;
+        Matrix diagonal = Matrix::Zero(2, 2);
+        diagonal.diagonal() << 1.0, epsilon;
+        Matrix result = rotation * diagonal * rotation.transpose();
+        return result;
+    };
+    p.derivative = [epsilon](const Vector& parameters, Eigen::Index k) {
+        check(k == 0, "rotating-subspace derivative parameter index");
+        const double c = std::cos(parameters(0));
+        const double s = std::sin(parameters(0));
+        Matrix rotation(2, 2);
+        rotation << c, -s, s, c;
+        Matrix diagonal = Matrix::Zero(2, 2);
+        diagonal.diagonal() << 1.0, epsilon;
+        Matrix generator(2, 2);
+        generator << 0.0, -1.0, 1.0, 0.0;
+        const Matrix basis = rotation * diagonal * rotation.transpose();
+        Matrix result = generator * basis - basis * generator;
+        return result;
+    };
+
+    Vector alpha(1);
+    alpha << 0.0;
+    LinearOptions linear_options;
+    linear_options.rcond = 1e-2;
+    const auto code = varpro::evaluate(p, alpha, linear_options, JacobianMode::exact);
+    check(code.rank == 1, "rotating-subspace cutoff rank");
+
+    const double h = 1e-6;
+    Vector plus = alpha, minus = alpha;
+    plus(0) += h;
+    minus(0) -= h;
+    const auto plus_evaluation = varpro::evaluate(p, plus, linear_options);
+    const auto minus_evaluation = varpro::evaluate(p, minus, linear_options);
+    const Matrix finite_difference =
+        (plus_evaluation.residuals - minus_evaluation.residuals) / (2.0 * h);
+
+    Matrix expected_finite_difference(2, 1);
+    expected_finite_difference << 1.2, -.7;
+    close_matrix(finite_difference, expected_finite_difference, 1e-9,
+                 "truncated rotating-subspace residual finite difference");
+
+    // This is an intentional contract test: exact mode uses the retained SVD
+    // formula and is not the derivative of the re-truncated residual map when
+    // a nonzero singular direction is discarded.
+    check((code.jacobian - finite_difference).cwiseAbs().maxCoeff() > 1e-4,
+          "exact mode unexpectedly matches truncated residual finite difference");
+    Matrix expected_code = (1.0 - epsilon) * expected_finite_difference;
+    close_matrix(code.jacobian, expected_code, 1e-12,
+                 "retained-subspace exact Jacobian");
+}
+
 template <class F> void expect_invalid(F&& f, const std::string& name) {
     try { f(); } catch (const std::invalid_argument&) { return; }
     throw std::runtime_error("expected invalid_argument: " + name);
@@ -371,6 +432,8 @@ int main() {
         {"rank deficient and rank zero", test_rank_cases},
         {"scale-safe rank cutoff", test_scale_safe_rank_cutoff},
         {"configurable rank cutoff", test_configurable_rank_cutoff},
+        {"exact Jacobian with truncated rotating subspace",
+         test_exact_jacobian_with_truncated_rotating_subspace},
         {"errors and evaluation limit", test_errors_and_limit},
     };
     int failures = 0;

@@ -99,7 +99,9 @@ J_k^{\text{exact}} = -P_A^\perp D_kC
 ```
 
 The minus sign in the second term follows the library's `B - A*C` residual
-convention. The exact mode can be selected for an evaluation or a fit:
+convention. `JacobianMode::exact` is the full VarPro Jacobian for a locally
+constant retained rank, with discarded singular directions treated as null.
+The exact mode can be selected for an evaluation or a fit:
 
 ```cpp
 const auto evaluation = varpro::evaluate(problem, alpha,
@@ -301,9 +303,14 @@ modeling choice.
 
 The returned Jacobian uses `Options::jacobian_mode` for `fit`, and Kaufman is
 the default for `evaluate`. Kaufman is generally not the exact residual
-derivative when the residual is nonzero. The exact mode is tested directly
-against residual finite differences at nonzero residuals. Derivatives may be
-discontinuous where the numerical rank changes. See
+derivative when the residual is nonzero. With full numerical rank, the exact
+mode is tested directly against residual finite differences at nonzero
+residuals. If an explicit `rcond` truncates a nonzero singular value, exact is
+not the derivative of the residual map that re-truncates the original basis at
+each parameter value; the discarded direction is treated as null by this
+contract. A locally constant numerical rank alone does not remove this
+distinction. Derivatives may be discontinuous where the numerical rank changes.
+See
 [CPP_DESIGN.md](CPP_DESIGN.md) for the precise formulas, cutoff, validation
 rules, and verification evidence.
 
