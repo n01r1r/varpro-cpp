@@ -38,7 +38,7 @@ matrix callbacks, `evaluate`, and `fit`. Do not add a generic backend layer.
 - `coefficients`: n x s, unconstrained real linear coefficients.
 - `residuals`: m x s, W * (Y - Phi * C), in weighted observation units.
 - `jacobian`: (m*s) x q, stacked by dataset/column, using the selected Kaufman
-  or exact residual-Jacobian mode.
+  or retained-subspace residual-Jacobian mode.
 - Objective: sum of all squared weighted residual entries, without averaging.
   `fit` additionally needs m*s >= q for Eigen's LM.
 
@@ -57,10 +57,10 @@ For D_k = W*dPhi/dalpha_k:
 
     J[:,k] = vec(U_r * (U_r^T * (D_k*C)) - D_k*C).
 
-This is the Kaufman approximation. Exact mode adds the coefficient response
-without building a pseudoinverse:
+This is the Kaufman approximation. Retained-subspace mode adds the coefficient
+response without building a pseudoinverse:
 
-    J_exact[:,k] = J_K[:,k]
+    J_retained[:,k] = J_K[:,k]
                     - vec(U_r * Sigma_r^-1 * V_r^T * D_k^T * R).
 
 The minus sign follows the documented residual convention `R = B-A*C`; it is
@@ -68,8 +68,9 @@ also the sign required by direct residual finite differences. `fit` selects the
 mode with `Options::jacobian_mode`, while `evaluate` defaults to Kaufman and
 accepts an explicit mode.
 
-`JacobianMode::exact` is exact for the full VarPro formula at a locally
-constant retained rank when discarded singular directions are treated as null.
+`JacobianMode::retained_subspace` is exact for the full VarPro formula at a
+locally constant retained rank when discarded singular directions are treated
+as null. `JacobianMode::exact` is retained as a compatibility alias.
 It is not a promise of the derivative of the implemented re-truncated residual
 map when an explicit `rcond` discards a nonzero singular value. In that case,
 the retained singular subspace can rotate according to the discarded singular
@@ -84,10 +85,15 @@ For `fit`, compute the constant weighted observations `B = W*Y` once on entry
 and reuse them across nonlinear evaluations.
 
 The Jacobian omits Part 1's b_k term, as the Rust implementation does. Kaufman
-is generally NOT the exact residual derivative at nonzero residual. The exact
-mode can be checked directly against residual finite differences there when no
-nonzero singular direction is truncated; explicit truncation follows the
-contract above.
+is generally NOT the full residual derivative at nonzero residual. The
+retained-subspace mode can be checked directly against residual finite
+differences there when no nonzero singular direction is truncated; explicit
+truncation follows the contract above.
+
+`Evaluation::diagnostics` exposes the full singular-value vector of `W*Phi`,
+`sigma_max`, the smallest retained singular value, and the retained-subspace
+condition estimate. The estimate is zero at rank zero and does not include
+discarded singular directions.
 
 ### Rank clarification
 

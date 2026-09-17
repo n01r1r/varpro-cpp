@@ -101,9 +101,11 @@ void test_single_and_mrhs_fit() {
     Problem p = exponential_problem(t, y);
     auto result = varpro::fit(p, initial);
     check_exp_fit(result, c, "MRHS fit");
+    check(result.evaluation.diagnostics.singular_values.size() == 3,
+          "MRHS fit diagnostics");
 
     varpro::Options exact_options;
-    exact_options.jacobian_mode = JacobianMode::exact;
+    exact_options.jacobian_mode = JacobianMode::retained_subspace;
     auto exact_result = varpro::fit(p, initial, exact_options);
     check_exp_fit(exact_result, c, "exact-Jacobian MRHS fit");
 }
@@ -208,26 +210,29 @@ void test_exact_jacobians() {
     const LinearOptions linear_options;
 
     Problem exact = exponential_problem(t, exp_data(t, a, c));
-    check_residual_jacobian(exact, a, linear_options, JacobianMode::exact, 3e-7,
-                            "exact zero-residual Jacobian finite difference");
+    check_residual_jacobian(exact, a, linear_options, JacobianMode::retained_subspace, 3e-7,
+                            "retained-subspace zero-residual Jacobian finite difference");
 
     Matrix mrhs_coefficients(3, 4);
     mrhs_coefficients << 2.3, -.7, 1.1, .2,
                          -1.1, 2.0, .3, -.4,
                          .4, .6, -.2, 1.7;
     Problem exact_mrhs = exponential_problem(t, exp_data(t, a, mrhs_coefficients));
-    check_residual_jacobian(exact_mrhs, a, linear_options, JacobianMode::exact, 3e-7,
-                            "exact zero-residual MRHS Jacobian finite difference");
+    check_residual_jacobian(exact_mrhs, a, linear_options, JacobianMode::retained_subspace, 3e-7,
+                            "retained-subspace zero-residual MRHS Jacobian finite difference");
 
     Problem off = exponential_problem(t, exp_data(t, a, c));
     off.observations(3, 0) += .13; off.observations(7, 0) -= .09;
     Vector x(2); x << 1.8, 5.5;
-    const auto exact_evaluation = varpro::evaluate(off, x, JacobianMode::exact);
+    const auto exact_evaluation = varpro::evaluate(off, x, JacobianMode::retained_subspace);
+    const auto compatibility_evaluation = varpro::evaluate(off, x, JacobianMode::exact);
     const auto kaufman_evaluation = varpro::evaluate(off, x);
+    close_matrix(compatibility_evaluation.jacobian, exact_evaluation.jacobian, 0.0,
+                 "exact compatibility alias");
     check((exact_evaluation.jacobian - kaufman_evaluation.jacobian).norm() > 1e-8,
-          "exact mode changes the nonzero-residual Jacobian");
-    check_residual_jacobian(off, x, linear_options, JacobianMode::exact, 3e-7,
-                            "exact nonzero-residual Jacobian finite difference");
+          "retained-subspace mode changes the nonzero-residual Jacobian");
+    check_residual_jacobian(off, x, linear_options, JacobianMode::retained_subspace, 3e-7,
+                            "retained-subspace nonzero-residual Jacobian finite difference");
 }
 
 void test_rank_cases() {
@@ -240,6 +245,12 @@ void test_rank_cases() {
     deficient.derivative = [t](const Vector& a, Eigen::Index k) { Matrix d = Matrix::Zero(t.size(), 2); if (k == 0) for (Eigen::Index i = 0; i < t.size(); ++i) d.row(i) << std::exp(-t(i) / a(0)) * t(i) / (a(0) * a(0)), std::exp(-t(i) / a(0)) * t(i) / (a(0) * a(0)); return d; };
     auto e = varpro::evaluate(deficient, x);
     check(e.rank == 1, "deficient rank");
+    check(e.diagnostics.singular_values.size() == 2, "deficient singular-value count");
+    check(e.diagnostics.sigma_max > 0.0 && e.diagnostics.sigma_min_retained > 0.0,
+          "deficient singular-value diagnostics");
+    close(e.diagnostics.condition_estimate,
+          e.diagnostics.sigma_max / e.diagnostics.sigma_min_retained, 1e-12,
+          "deficient condition estimate");
     close(e.coefficients(0, 0), e.coefficients(1, 0), 2e-12, "minimum-norm duplicated coefficients");
     Matrix d = deficient.derivative(x, 0), phi = deficient.basis(x);
     const double expected_sum = phi.col(0).dot(deficient.observations.col(0)) /
@@ -260,6 +271,10 @@ void test_rank_cases() {
     zero.derivative = [](const Vector&, Eigen::Index) { return Matrix::Zero(6, 2); };
     auto z = varpro::evaluate(zero, x);
     check(z.rank == 0, "rank zero");
+    check(z.diagnostics.singular_values.size() == 2, "rank-zero singular-value count");
+    close(z.diagnostics.sigma_max, 0.0, 0.0, "rank-zero sigma max");
+    close(z.diagnostics.sigma_min_retained, 0.0, 0.0, "rank-zero retained sigma");
+    close(z.diagnostics.condition_estimate, 0.0, 0.0, "rank-zero condition estimate");
     close_matrix(z.coefficients, Matrix::Zero(2, 1), 0.0, "rank zero coefficients");
     close_matrix(z.jacobian, Matrix::Zero(6, 1), 0.0, "rank zero Jacobian");
 }
@@ -339,7 +354,8 @@ void test_exact_jacobian_with_truncated_rotating_subspace() {
     alpha << 0.0;
     LinearOptions linear_options;
     linear_options.rcond = 1e-2;
-    const auto code = varpro::evaluate(p, alpha, linear_options, JacobianMode::exact);
+    const auto code = varpro::evaluate(p, alpha, linear_options,
+                                       JacobianMode::retained_subspace);
     check(code.rank == 1, "rotating-subspace cutoff rank");
 
     const double h = 1e-6;
@@ -356,11 +372,11 @@ void test_exact_jacobian_with_truncated_rotating_subspace() {
     close_matrix(finite_difference, expected_finite_difference, 1e-9,
                  "truncated rotating-subspace residual finite difference");
 
-    // This is an intentional contract test: exact mode uses the retained SVD
+    // This is an intentional contract test: retained-subspace mode uses the retained SVD
     // formula and is not the derivative of the re-truncated residual map when
     // a nonzero singular direction is discarded.
     check((code.jacobian - finite_difference).cwiseAbs().maxCoeff() > 1e-4,
-          "exact mode unexpectedly matches truncated residual finite difference");
+          "retained-subspace mode unexpectedly matches truncated residual finite difference");
     Matrix expected_code = (1.0 - epsilon) * expected_finite_difference;
     close_matrix(code.jacobian, expected_code, 1e-12,
                  "retained-subspace exact Jacobian");
@@ -440,7 +456,7 @@ void test_randomized_derivatives_and_invariants() {
         const auto kaufman = varpro::evaluate(problem, parameters, linear_options,
                                               JacobianMode::kaufman);
         const auto exact = varpro::evaluate(problem, parameters, linear_options,
-                                            JacobianMode::exact);
+                                            JacobianMode::retained_subspace);
         check(kaufman.rank == n && exact.rank == n,
               "randomized case lost full numerical rank " + std::to_string(case_index));
 
@@ -468,9 +484,9 @@ void test_randomized_derivatives_and_invariants() {
                   "randomized basis derivative " + std::to_string(case_index) + "/" +
                       std::to_string(k));
             const auto plus_evaluation = varpro::evaluate(
-                problem, plus, linear_options, JacobianMode::exact);
+                problem, plus, linear_options, JacobianMode::retained_subspace);
             const auto minus_evaluation = varpro::evaluate(
-                problem, minus, linear_options, JacobianMode::exact);
+                problem, minus, linear_options, JacobianMode::retained_subspace);
             const Matrix finite_difference_matrix =
                 (plus_evaluation.residuals - minus_evaluation.residuals) / (2.0 * h);
             const Vector finite_difference = Eigen::Map<const Vector>(
@@ -563,11 +579,11 @@ int main() {
         {"single and MRHS fit", test_single_and_mrhs_fit},
         {"weighting and orthogonality", test_weighting_and_orthogonality},
         {"Kaufman Jacobians", test_kaufman_jacobians},
-        {"exact Jacobians", test_exact_jacobians},
+        {"retained-subspace Jacobians", test_exact_jacobians},
         {"rank deficient and rank zero", test_rank_cases},
         {"scale-safe rank cutoff", test_scale_safe_rank_cutoff},
         {"configurable rank cutoff", test_configurable_rank_cutoff},
-        {"exact Jacobian with truncated rotating subspace",
+        {"retained-subspace Jacobian with truncated rotating subspace",
          test_exact_jacobian_with_truncated_rotating_subspace},
         {"randomized derivatives and invariants", test_randomized_derivatives_and_invariants},
         {"errors and evaluation limit", test_errors_and_limit},

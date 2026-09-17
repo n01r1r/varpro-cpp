@@ -97,11 +97,19 @@ enum class JacobianMode {
     /**
      * @brief Include the response of the eliminated linear coefficients.
      *
-     * This is the exact VarPro formula for a locally constant retained rank.
+     * This is the full VarPro formula for a locally constant retained rank.
      * If an explicit cutoff discards a nonzero singular direction, the
      * discarded direction is treated as null by the implementation.
      */
-    exact
+    retained_subspace,
+
+    /**
+     * @brief Compatibility alias for @c retained_subspace.
+     *
+     * Prefer @c retained_subspace in new code. This mode is not a promise of
+     * the derivative of a residual map that re-truncates a rotating SVD.
+     */
+    exact = retained_subspace
 };
 
 /**
@@ -117,6 +125,25 @@ struct LinearOptions {
      * @f$\max(m,n)\,\epsilon@f$.
      */
     double rcond = -1.0;
+};
+
+/**
+ * @brief Singular-value diagnostics for one weighted basis evaluation.
+ *
+ * The singular values belong to @f$W\Phi(\alpha)@f$, before numerical-rank
+ * truncation. The condition estimate uses only the retained subspace:
+ * @f$\sigma_{\max}/\sigma_{\min,\mathrm{retained}}@f$. It is zero when the
+ * retained rank is zero and does not describe discarded directions.
+ */
+struct Diagnostics {
+    /** @brief All singular values of the weighted basis, descending. */
+    Vector singular_values;
+    /** @brief Largest singular value of the weighted basis. */
+    double sigma_max = 0.0;
+    /** @brief Smallest singular value retained by the numerical-rank cutoff. */
+    double sigma_min_retained = 0.0;
+    /** @brief Condition estimate of the retained singular subspace. */
+    double condition_estimate = 0.0;
 };
 
 /**
@@ -148,6 +175,11 @@ struct Evaluation {
      * @brief Numerical rank retained by the compact SVD solve.
      */
     Eigen::Index rank = 0;
+
+    /**
+     * @brief Singular-value and conditioning information for the weighted basis.
+     */
+    Diagnostics diagnostics;
 
     /**
      * @brief Returns the sum of squared weighted residual entries.
@@ -267,8 +299,8 @@ struct FitResult {
  * @param parameters Nonlinear parameter vector to evaluate.
  * @param linear_options Numerical-rank options for the linear solve.
  * @param jacobian_mode Formula used for the residual Jacobian.
- * @return Coefficients, weighted residuals, selected Jacobian, and retained
- *         numerical rank at @p parameters.
+ * @return Coefficients, weighted residuals, selected Jacobian, retained
+ *         numerical rank, and SVD diagnostics at @p parameters.
  * @throws std::invalid_argument If the inputs, callback results' shapes, or
  *         linear options violate the API contract.
  * @throws std::domain_error If a model callback or numerical calculation

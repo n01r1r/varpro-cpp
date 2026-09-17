@@ -126,25 +126,27 @@ optimizer for models in which every parameter is nonlinear.
 ## Jacobian modes
 
 The default `JacobianMode::kaufman` uses the compact-SVD Kaufman approximation.
-For a residual `R = B - A*C`, `JacobianMode::exact` adds the linear-coefficient
-response without constructing a pseudoinverse:
+For a residual `R = B - A*C`, `JacobianMode::retained_subspace` adds the
+linear-coefficient response without constructing a pseudoinverse:
 
 ```math
-J_k^{\text{exact}} = -P_A^\perp D_kC
+J_k^{\text{retained}} = -P_A^\perp D_kC
  - U_r\Sigma_r^{-1}V_r^\top D_k^\top R.
 ```
 
 The minus sign in the second term follows the library's `B - A*C` residual
-convention. `JacobianMode::exact` is the full VarPro Jacobian for a locally
-constant retained rank, with discarded singular directions treated as null.
-The exact mode can be selected for an evaluation or a fit:
+convention. `JacobianMode::retained_subspace` is the full VarPro Jacobian for
+a locally constant retained rank, with discarded singular directions treated
+as null. `JacobianMode::exact` remains a compatibility alias; new code should
+use `retained_subspace`. The retained-subspace mode can be selected for an
+evaluation or a fit:
 
 ```cpp
 const auto evaluation = varpro::evaluate(problem, alpha,
-                                         varpro::JacobianMode::exact);
+                                         varpro::JacobianMode::retained_subspace);
 
 varpro::Options options;
-options.jacobian_mode = varpro::JacobianMode::exact;
+options.jacobian_mode = varpro::JacobianMode::retained_subspace;
 options.linear_options.rcond = 1e-10;  // < 0 keeps the automatic cutoff.
 const auto result = varpro::fit(problem, initial, options);
 ```
@@ -337,15 +339,22 @@ the retained subspace for the minimum-norm linear solution and projector.
 `max(m, n) * epsilon`; a nonnegative value makes the numerical rank an explicit
 modeling choice.
 
+`Evaluation::diagnostics` reports all singular values of the weighted basis,
+the largest singular value, the smallest retained singular value, and the
+condition estimate of the retained subspace. A rank-zero evaluation reports
+zero for the retained minimum and condition estimate. The condition estimate
+does not describe discarded singular directions.
+
 The returned Jacobian uses `Options::jacobian_mode` for `fit`, and Kaufman is
-the default for `evaluate`. Kaufman is generally not the exact residual
-derivative when the residual is nonzero. With full numerical rank, the exact
-mode is tested directly against residual finite differences at nonzero
-residuals. If an explicit `rcond` truncates a nonzero singular value, exact is
-not the derivative of the residual map that re-truncates the original basis at
-each parameter value; the discarded direction is treated as null by this
-contract. A locally constant numerical rank alone does not remove this
-distinction. Derivatives may be discontinuous where the numerical rank changes.
+the default for `evaluate`. Kaufman is generally not the full residual
+derivative when the residual is nonzero. With full numerical rank, the
+retained-subspace mode is tested directly against residual finite differences
+at nonzero residuals. If an explicit `rcond` truncates a nonzero singular
+value, the retained-subspace formula is not the derivative of the residual map
+that re-truncates the original basis at each parameter value; the discarded
+direction is treated as null by this contract. A locally constant numerical
+rank alone does not remove this distinction. Derivatives may be discontinuous
+where the numerical rank changes.
 See
 [CPP_DESIGN.md](CPP_DESIGN.md) for the precise formulas, cutoff, validation
 rules, and verification evidence.

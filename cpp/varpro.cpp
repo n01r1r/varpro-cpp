@@ -65,7 +65,7 @@ void validate_linear_options(const LinearOptions& options) {
 }
 
 void validate_jacobian_mode(JacobianMode mode) {
-    if (mode != JacobianMode::kaufman && mode != JacobianMode::exact)
+    if (mode != JacobianMode::kaufman && mode != JacobianMode::retained_subspace)
         throw std::invalid_argument("invalid Jacobian mode");
 }
 
@@ -112,6 +112,7 @@ struct Prepared {
     Matrix retained_v;
     Vector retained_sigma;
     Matrix jacobian;
+    Diagnostics diagnostics;
     bool has_jacobian = false;
 };
 
@@ -173,6 +174,8 @@ Prepared prepare(const Problem& problem, const Vector& parameters,
             ++rank;
 
     Prepared result;
+    result.diagnostics.singular_values = singular_values;
+    result.diagnostics.sigma_max = sigma_max;
     result.n = n;
     result.rank = rank;
     result.coefficients = Matrix::Zero(n, s);
@@ -183,6 +186,11 @@ Prepared prepare(const Problem& problem, const Vector& parameters,
         result.retained_u = svd.matrixU().leftCols(rank);
         result.retained_v = svd.matrixV().leftCols(rank);
         result.retained_sigma = singular_values.head(rank);
+        result.diagnostics.sigma_min_retained = result.retained_sigma(rank - 1);
+        result.diagnostics.condition_estimate =
+            sigma_max / result.diagnostics.sigma_min_retained;
+        if (!std::isfinite(result.diagnostics.condition_estimate))
+            throw std::domain_error("condition estimate overflowed");
         if (!finite(result.retained_u) || !finite(result.retained_v) ||
             !finite(result.retained_sigma))
             throw std::domain_error("SVD returned nonfinite singular vectors");
@@ -258,22 +266,22 @@ Matrix form_jacobian(const Problem& problem, const Vector& parameters, Prepared&
                 throw std::domain_error("Jacobian intermediate is nonfinite");
             column_matrix = projected_derivative * prepared.coefficients;
         }
-        if (jacobian_mode == JacobianMode::exact && prepared.rank != 0) {
-            // The exact retained-subspace formula adds the response of the
+        if (jacobian_mode == JacobianMode::retained_subspace && prepared.rank != 0) {
+            // The retained-subspace formula adds the response of the
             // eliminated linear coefficients:
-            //     J_exact = J_Kaufman
+            //     J_retained = J_Kaufman
             //               - U_r Sigma_r^-1 V_r^T D_k^T R.
             // The subtraction sign follows the residual convention B - A*C.
             Matrix correction = weighted_derivative.transpose() * prepared.residuals;
             if (!finite(correction))
-                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+                throw std::domain_error("retained-subspace Jacobian intermediate is nonfinite");
             correction = prepared.retained_v.transpose() * correction;
             if (!finite(correction))
-                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+                throw std::domain_error("retained-subspace Jacobian intermediate is nonfinite");
             for (Index i = 0; i < prepared.rank; ++i)
                 correction.row(i) /= prepared.retained_sigma(i);
             if (!finite(correction))
-                throw std::domain_error("exact Jacobian intermediate is nonfinite");
+                throw std::domain_error("retained-subspace Jacobian intermediate is nonfinite");
             column_matrix.noalias() -= prepared.retained_u * correction;
         }
         if (!finite(column_matrix))
@@ -337,6 +345,7 @@ public:
         Evaluation result;
         result.coefficients = current.coefficients;
         result.residuals = current.residuals;
+        result.diagnostics = current.diagnostics;
         result.jacobian = current.jacobian;
         result.rank = current.rank;
         return result;
@@ -422,6 +431,7 @@ Evaluation evaluate(const Problem& problem, const Vector& parameters,
     Evaluation result;
     result.coefficients = std::move(prepared.coefficients);
     result.residuals = std::move(prepared.residuals);
+    result.diagnostics = std::move(prepared.diagnostics);
     result.jacobian = std::move(jacobian);
     result.rank = prepared.rank;
     return result;
