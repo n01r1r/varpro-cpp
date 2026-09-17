@@ -4,6 +4,42 @@ Small C++17 implementation of variable projection for separable nonlinear
 least-squares problems. The library has one public header, one implementation
 file, and Eigen as its only C++ dependency.
 
+## Acknowledgements and provenance
+
+This project is a C++ implementation of the variable-projection workflow
+from [Geo's `varpro` repository](https://github.com/geo-ant/varpro), the
+original Rust library for fitting separable nonlinear models. The C++ port was
+developed from the [C++ reference repository](https://github.com/n01r1r/varpro-cpp)
+and is maintained here as a smaller Eigen-based implementation.
+
+The original `varpro` README credits Professor
+[Dianne P. O'Leary](http://www.cs.umd.edu/~oleary/) and Professor
+[Bert W. Rust](https://math.nist.gov/~BRust/) for the paper that enabled the
+author to understand variable projection and develop that implementation. We
+preserve that acknowledgement here, including the cited paper:
+
+- O'Leary, D. P., and Rust, B. W. [Variable projection for nonlinear least
+  squares problems](https://doi.org/10.1007/s10589-012-9492-9), *Computational
+Optimization and Applications* 54, 579–593 (2013).
+
+The original `varpro` project also records its gratitude to Professor O'Leary
+for answering questions about the paper and implementation details.
+
+We also acknowledge Geo's explanatory articles in [Geo's
+Notepad](https://geo-ant.github.io/), which provide the implementation-oriented
+derivation used by this port:
+
+- [The Variable Projection Method – Nonlinear Least Squares Fitting with
+  VarPro](https://geo-ant.github.io/blog/2020/variable-projection-part-1-fundamentals/)
+  (updated 2023);
+- [Global Fitting of Multiple Right Hand Sides with Variable
+  Projection](https://geo-ant.github.io/blog/2024/variable-projection-part-2-multiple-right-hand-sides/).
+
+The first article notes errors in some formulas in the O'Leary–Rust
+presentation and presents corrected formulas. For the broader mathematical
+foundation, see also Golub and Pereyra, [Separable nonlinear least squares: the
+variable projection method and its applications](https://doi.org/10.1088/0266-5611/19/2/201).
+
 ## What it does
 
 Many models contain two different kinds of parameters:
@@ -372,17 +408,15 @@ building blocks in a maintained dependency makes this port smaller and easier
 to review. No speedup over Rust or equivalence of optimizer trajectories is
 claimed.
 
-## References and original implementation
+## Provenance and references
 
-- [Variable projection fundamentals](https://geo-ant.github.io/blog/2020/variable-projection-part-1-fundamentals/)
-- [Global fitting of multiple right-hand sides](https://geo-ant.github.io/blog/2024/variable-projection-part-2-multiple-right-hand-sides/)
-- [Original repository](https://github.com/n01r1r/varpro-cpp) at reference commit
+- [Original `varpro` repository](https://github.com/geo-ant/varpro).
+- [C++ reference repository](https://github.com/n01r1r/varpro-cpp) at reference commit
   `29d847047966c0dd93550d7c5222bdfa34befdea`.
 - [Archived original README](docs/original/README.md), retained verbatim for
   provenance and the original citations.
-- [Port references and provenance](docs/REFERENCES.md).
+- [Detailed port references and provenance](docs/REFERENCES.md).
 
-The equations and weighting convention follow the references above. The
-maintained tree contains the C++ port only; the archived README and links
-preserve the original project's provenance. The original MIT license and
-attribution are retained in [LICENSE](LICENSE).
+The maintained tree contains the C++ implementation only. The archived README
+preserves the upstream project's original citations and acknowledgement, and
+the original MIT license and attribution are retained in [LICENSE](LICENSE).
