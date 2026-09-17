@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC Release
+            os: ubuntu-latest
+            compiler: g++
+            build_type: Release
+          - name: Linux GCC Debug
+            os: ubuntu-latest
+            compiler: g++
+            build_type: Debug
+          - name: Linux Clang Release
+            os: ubuntu-latest
+            compiler: clang++
+            build_type: Release
+          - name: Linux Clang Debug
+            os: ubuntu-latest
+            compiler: clang++
+            build_type: Debug
+          - name: Windows MSVC Release
+            os: windows-latest
+            compiler: msvc
+            build_type: Release
+          - name: Windows MSVC Debug
+            os: windows-latest
+            compiler: msvc
+            build_type: Debug
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Eigen
+        shell: bash
+        run: git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git eigen-src
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [[ "${{ matrix.compiler }}" != "msvc" ]]; then
+            export CXX="${{ matrix.compiler }}"
+          fi
+          cmake -S . -B build \
+            -DBUILD_TESTING=ON \
+            -DVARPRO_BUILD_EXAMPLE=ON \
+            -DEIGEN3_INCLUDE_DIR="$GITHUB_WORKSPACE/eigen-src" \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Run tests
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Run example
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./build/${{ matrix.build_type }}/double_exponential.exe
+          else
+            ./build/double_exponential
+          fi
+
+  sanitizers:
+    name: Sanitizers (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Eigen
+        shell: bash
+        run: git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git eigen-src
+
+      - name: Configure
+        shell: bash
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: |
+          cmake -S . -B build \
+            -DBUILD_TESTING=ON \
+            -DVARPRO_BUILD_EXAMPLE=OFF \
+            -DEIGEN3_INCLUDE_DIR="$GITHUB_WORKSPACE/eigen-src" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Debug --parallel 2
+
+      - name: Run tests
+        shell: bash
+        run: ctest --test-dir build -C Debug --output-on-failure
