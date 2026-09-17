@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -363,6 +366,138 @@ void test_exact_jacobian_with_truncated_rotating_subspace() {
                  "retained-subspace exact Jacobian");
 }
 
+void test_randomized_derivatives_and_invariants() {
+    std::mt19937_64 rng(0x5eed1234ULL);
+    // Fixed integer/scaled draws keep the generated cases reproducible across
+    // standard-library distribution implementations.
+    auto unit = [&]() {
+        constexpr double scale = 1.0 / 9007199254740992.0;
+        return 2.0 * static_cast<double>(rng() >> 11) * scale - 1.0;
+    };
+    auto index = [&](int lower, int upper) {
+        return lower + static_cast<int>(rng() % static_cast<std::uint64_t>(upper - lower + 1));
+    };
+
+    for (int case_index = 0; case_index < 24; ++case_index) {
+        const Eigen::Index n = index(1, 4);
+        const Eigen::Index m = (std::max)(n + 3, static_cast<Eigen::Index>(index(6, 12)));
+        const Eigen::Index q = index(1, 3);
+        const Eigen::Index s = index(1, 3);
+
+        Matrix base(m, n);
+        std::vector<Matrix> rates;
+        for (Eigen::Index i = 0; i < m; ++i)
+            for (Eigen::Index j = 0; j < n; ++j)
+                base(i, j) = unit();
+        base.topRows(n) += 2.0 * Matrix::Identity(n, n);
+        for (Eigen::Index k = 0; k < q; ++k) {
+            Matrix rate(m, n);
+            for (Eigen::Index i = 0; i < m; ++i)
+                for (Eigen::Index j = 0; j < n; ++j)
+                    rate(i, j) = 0.3 * unit();
+            rates.push_back(std::move(rate));
+        }
+
+        auto basis = [base, rates](const Vector& parameters) {
+            Matrix result = base;
+            for (Eigen::Index i = 0; i < result.rows(); ++i) {
+                for (Eigen::Index j = 0; j < result.cols(); ++j) {
+                    double exponent = 0.0;
+                    for (Eigen::Index k = 0; k < parameters.size(); ++k)
+                        exponent += parameters(k) * rates[k](i, j);
+                    result(i, j) *= std::exp(exponent);
+                }
+            }
+            return result;
+        };
+
+        Problem problem;
+        problem.basis = basis;
+        problem.derivative = [basis, rates](const Vector& parameters, Eigen::Index k) {
+            const Matrix evaluated_basis = basis(parameters);
+            return Matrix(evaluated_basis.cwiseProduct(rates[k]));
+        };
+        problem.weights = Vector(m);
+        for (Eigen::Index i = 0; i < m; ++i)
+            problem.weights(i) = 1.0 + 0.5 * unit();
+
+        Vector truth(q), parameters(q);
+        for (Eigen::Index k = 0; k < q; ++k) {
+            truth(k) = 0.2 * unit();
+            parameters(k) = truth(k) + 0.08 * unit();
+        }
+        Matrix coefficients(n, s);
+        for (Eigen::Index i = 0; i < n; ++i)
+            for (Eigen::Index j = 0; j < s; ++j)
+                coefficients(i, j) = unit();
+        problem.observations = basis(truth) * coefficients;
+        for (Eigen::Index i = 0; i < m; ++i)
+            for (Eigen::Index j = 0; j < s; ++j)
+                problem.observations(i, j) += 0.03 * unit();
+
+        LinearOptions linear_options;
+        linear_options.rcond = 1e-12;
+        const auto kaufman = varpro::evaluate(problem, parameters, linear_options,
+                                              JacobianMode::kaufman);
+        const auto exact = varpro::evaluate(problem, parameters, linear_options,
+                                            JacobianMode::exact);
+        check(kaufman.rank == n && exact.rank == n,
+              "randomized case lost full numerical rank " + std::to_string(case_index));
+
+        const Vector residual_vector = Eigen::Map<const Vector>(
+            kaufman.residuals.data(), kaufman.residuals.size());
+        Matrix weighted_basis = basis(parameters);
+        for (Eigen::Index i = 0; i < m; ++i)
+            weighted_basis.row(i) *= problem.weights(i);
+        const double orthogonality =
+            (weighted_basis.transpose() * kaufman.residuals).norm();
+        check(orthogonality <= 1e-10 * (1.0 + weighted_basis.norm() * kaufman.residuals.norm()),
+              "randomized residual orthogonality " + std::to_string(case_index));
+
+        for (Eigen::Index k = 0; k < q; ++k) {
+            const double h = 1e-6;
+            Vector plus = parameters, minus = parameters;
+            plus(k) += h;
+            minus(k) -= h;
+            const Matrix basis_finite_difference =
+                (basis(plus) - basis(minus)) / (2.0 * h);
+            const double basis_error =
+                (problem.derivative(parameters, k) - basis_finite_difference).norm() /
+                (1.0 + basis_finite_difference.norm());
+            check(basis_error <= 1e-8,
+                  "randomized basis derivative " + std::to_string(case_index) + "/" +
+                      std::to_string(k));
+            const auto plus_evaluation = varpro::evaluate(
+                problem, plus, linear_options, JacobianMode::exact);
+            const auto minus_evaluation = varpro::evaluate(
+                problem, minus, linear_options, JacobianMode::exact);
+            const Matrix finite_difference_matrix =
+                (plus_evaluation.residuals - minus_evaluation.residuals) / (2.0 * h);
+            const Vector finite_difference = Eigen::Map<const Vector>(
+                finite_difference_matrix.data(), finite_difference_matrix.size());
+            const double jacobian_error =
+                (exact.jacobian.col(k) - finite_difference).norm() /
+                (1.0 + finite_difference.norm());
+            check(jacobian_error <= 5e-6,
+                  "randomized exact Jacobian " + std::to_string(case_index) + "/" +
+                      std::to_string(k) + " error=" + std::to_string(jacobian_error) +
+                      " m=" + std::to_string(m) + " n=" + std::to_string(n) +
+                      " q=" + std::to_string(q) + " s=" + std::to_string(s) +
+                      " analytic=" + std::to_string(exact.jacobian.col(k).norm()) +
+                      " finite_difference=" + std::to_string(finite_difference.norm()));
+
+            const double finite_difference_error =
+                (plus_evaluation.squared_error() - minus_evaluation.squared_error()) / (2.0 * h);
+            const double objective_gradient =
+                2.0 * kaufman.jacobian.col(k).dot(residual_vector);
+            check(std::abs(objective_gradient - finite_difference_error) <=
+                      5e-6 * (1.0 + std::abs(finite_difference_error)),
+                  "randomized objective gradient " + std::to_string(case_index) + "/" +
+                      std::to_string(k));
+        }
+    }
+}
+
 template <class F> void expect_invalid(F&& f, const std::string& name) {
     try { f(); } catch (const std::invalid_argument&) { return; }
     throw std::runtime_error("expected invalid_argument: " + name);
@@ -434,6 +569,7 @@ int main() {
         {"configurable rank cutoff", test_configurable_rank_cutoff},
         {"exact Jacobian with truncated rotating subspace",
          test_exact_jacobian_with_truncated_rotating_subspace},
+        {"randomized derivatives and invariants", test_randomized_derivatives_and_invariants},
         {"errors and evaluation limit", test_errors_and_limit},
     };
     int failures = 0;
