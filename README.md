@@ -258,6 +258,17 @@ The library does not impose parameter bounds. For a quantity that must be
 positive, use a transformed parameter in the callback, such as
 `tau = std::exp(log_tau)`, and optimize `log_tau`.
 
+## GGX reduced-residual diagnostic example
+
+`build/ggx_reduced_diagnostic` (or `build/Release/ggx_reduced_diagnostic.exe`)
+demonstrates conditional elimination of a diffuse mean from an affine GGX
+model with a fixed normal and view. It reuses `evaluate`'s shared SVD to
+project the mean and derivative right-hand sides, then separately diagnoses
+the reduced residual Jacobian. Mean bounds and their branch derivatives stay
+in the example; the library API is unchanged. This is a diagnostic evaluation,
+not a GGX fit or an extension of the retained-subspace Jacobian contract.
+See [the mapping, assumptions, and counterexamples](docs/GGX_DIAGNOSTIC.md).
+
 ## Multiple datasets (multiple right-hand sides)
 
 Store datasets as columns of one matrix:

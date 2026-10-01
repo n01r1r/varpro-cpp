@@ -56,10 +56,12 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/varpro
 )
 
-option(VARPRO_BUILD_EXAMPLE "Build the double-exponential example" ON)
+option(VARPRO_BUILD_EXAMPLE "Build examples" ON)
 if(VARPRO_BUILD_EXAMPLE)
     add_executable(double_exponential examples/double_exponential.cpp)
     target_link_libraries(double_exponential PRIVATE varpro::varpro)
+    add_executable(ggx_reduced_diagnostic examples/ggx_reduced_diagnostic.cpp)
+    target_link_libraries(ggx_reduced_diagnostic PRIVATE varpro::varpro)
 endif()
 
 include(CTest)
@@ -67,4 +69,7 @@ if(BUILD_TESTING)
     add_executable(varpro_tests tests/cpp/test_varpro.cpp)
     target_link_libraries(varpro_tests PRIVATE varpro::varpro)
     add_test(NAME varpro_tests COMMAND varpro_tests)
+    add_executable(ggx_diagnostic_tests tests/cpp/test_ggx_diagnostic.cpp)
+    target_link_libraries(ggx_diagnostic_tests PRIVATE varpro::varpro)
+    add_test(NAME ggx_diagnostic_tests COMMAND ggx_diagnostic_tests)
 endif()
