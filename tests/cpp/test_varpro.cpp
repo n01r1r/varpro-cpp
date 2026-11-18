@@ -11,6 +11,8 @@
 
 #include <varpro/varpro.hpp>
 
+double header_only_other_translation_unit();
+
 namespace {
 
 using varpro::JacobianMode;
@@ -45,17 +47,17 @@ Problem exponential_problem(const Vector& t, const Matrix& observations,
   p.observations = observations;
   p.basis = [t, offset](const Vector& a) {
     Matrix phi(t.size(), offset ? 3 : 2);
-    for (Eigen::Index i = 0; i < t.size(); ++i) {
+    for (varpro::Index i = 0; i < t.size(); ++i) {
       phi(i, 0) = std::exp(-t(i) / a(0));
       phi(i, 1) = std::exp(-t(i) / a(1));
       if (offset) phi(i, 2) = 1.0;
     }
     return phi;
   };
-  p.derivative = [t, offset](const Vector& a, Eigen::Index k) {
+  p.derivative = [t, offset](const Vector& a, varpro::Index k) {
     Matrix d = Matrix::Zero(t.size(), offset ? 3 : 2);
     if (k < 2) {
-      for (Eigen::Index i = 0; i < t.size(); ++i)
+      for (varpro::Index i = 0; i < t.size(); ++i)
         d(i, k) = std::exp(-t(i) / a(k)) * t(i) / (a(k) * a(k));
     }
     return d;
@@ -66,8 +68,8 @@ Problem exponential_problem(const Vector& t, const Matrix& observations,
 Matrix exp_data(const Vector& t, const Vector& taus,
                 const Matrix& coefficients) {
   Matrix phi(t.size(), taus.size() + 1);
-  for (Eigen::Index i = 0; i < t.size(); ++i) {
-    for (Eigen::Index k = 0; k < taus.size(); ++k)
+  for (varpro::Index i = 0; i < t.size(); ++i) {
+    for (varpro::Index k = 0; k < taus.size(); ++k)
       phi(i, k) = std::exp(-t(i) / taus(k));
     phi(i, taus.size()) = 1.0;
   }
@@ -82,11 +84,16 @@ void check_exp_fit(const varpro::FitResult& result,
                       std::abs(result.parameters(1) - 3.0) < 2e-6;
   const bool swapped = std::abs(result.parameters(0) - 3.0) < 2e-6 &&
                        std::abs(result.parameters(1) - 1.0) < 2e-6;
-  check(direct || swapped, label + " nonlinear parameters");
+  check(direct || swapped, label + " nonlinear parameters (" +
+        std::to_string(result.parameters(0)) + "," +
+        std::to_string(result.parameters(1)) + ") status=" +
+        std::to_string(static_cast<int>(result.status)));
   Matrix coefficients = expected_coefficients;
   if (swapped) {
-    coefficients.row(0) = expected_coefficients.row(1);
-    coefficients.row(1) = expected_coefficients.row(0);
+    for (varpro::Index j = 0; j < coefficients.cols(); ++j) {
+      coefficients(0,j) = expected_coefficients(1,j);
+      coefficients(1,j) = expected_coefficients(0,j);
+    }
   }
   close_matrix(result.evaluation.coefficients, coefficients, 2e-6,
                label + " coefficients");
@@ -98,7 +105,7 @@ void check_exp_fit(const varpro::FitResult& result,
 
 void test_single_and_mrhs_fit() {
   Vector t(11);
-  for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = static_cast<double>(i);
+  for (varpro::Index i = 0; i < t.size(); ++i) t(i) = static_cast<double>(i);
   Vector truth(2);
   truth << 1.0, 3.0;
   Matrix c(3, 3);
@@ -124,7 +131,7 @@ void test_single_and_mrhs_fit() {
 
 void test_weighting_and_orthogonality() {
   Vector t(8);
-  for (Eigen::Index i = 0; i < t.size(); ++i)
+  for (varpro::Index i = 0; i < t.size(); ++i)
     t(i) = static_cast<double>(i) * .7;
   Vector a(2);
   a << 1.4, 4.2;
@@ -141,8 +148,8 @@ void test_weighting_and_orthogonality() {
   Matrix phi = weighted.basis(a);
   Matrix aw = phi;
   Matrix rw = e.residuals;
-  for (Eigen::Index i = 0; i < t.size(); ++i) {
-    aw.row(i) *= w(i);
+  for (varpro::Index i = 0; i < t.size(); ++i) {
+    for (varpro::Index j = 0; j < aw.cols(); ++j) aw(i,j) *= w(i);
   }
   close_matrix(aw.transpose() * rw, Matrix::Zero(3, 1), 2e-12,
                "weighted residual orthogonality");
@@ -151,17 +158,20 @@ void test_weighting_and_orthogonality() {
   preweighted.observations = y;
   preweighted.basis = [base = weighted.basis, w](const Vector& x) {
     Matrix z = base(x);
-    for (Eigen::Index i = 0; i < z.rows(); ++i) z.row(i) *= w(i);
+    for (varpro::Index i = 0; i < z.rows(); ++i)
+      for (varpro::Index j = 0; j < z.cols(); ++j) z(i,j) *= w(i);
     return z;
   };
   preweighted.derivative = [deriv = weighted.derivative, w](const Vector& x,
-                                                            Eigen::Index k) {
+                                                            varpro::Index k) {
     Matrix z = deriv(x, k);
-    for (Eigen::Index i = 0; i < z.rows(); ++i) z.row(i) *= w(i);
+    for (varpro::Index i = 0; i < z.rows(); ++i)
+      for (varpro::Index j = 0; j < z.cols(); ++j) z(i,j) *= w(i);
     return z;
   };
-  for (Eigen::Index i = 0; i < y.rows(); ++i)
-    preweighted.observations.row(i) *= w(i);
+  for (varpro::Index i = 0; i < y.rows(); ++i)
+    for (varpro::Index j = 0; j < y.cols(); ++j)
+      preweighted.observations(i,j) *= w(i);
   auto ep = varpro::evaluate(preweighted, a);
   close_matrix(e.coefficients, ep.coefficients, 2e-12,
                "manual preweight coefficients");
@@ -192,24 +202,25 @@ void check_residual_jacobian(const Problem& problem, const Vector& parameters,
       varpro::evaluate(problem, parameters, linear_options, mode);
   const double h = 1e-6;
   Matrix fd(evaluation.jacobian.rows(), parameters.size());
-  const Eigen::Index m = problem.observations.rows();
-  const Eigen::Index s = problem.observations.cols();
-  for (Eigen::Index k = 0; k < parameters.size(); ++k) {
+  const varpro::Index m = problem.observations.rows();
+  const varpro::Index s = problem.observations.cols();
+  for (varpro::Index k = 0; k < parameters.size(); ++k) {
     Vector plus = parameters, minus = parameters;
     plus(k) += h;
     minus(k) -= h;
     Matrix difference =
         varpro::evaluate(problem, plus, linear_options, mode).residuals -
         varpro::evaluate(problem, minus, linear_options, mode).residuals;
-    for (Eigen::Index j = 0; j < s; ++j)
-      fd.col(k).segment(j * m, m) = difference.col(j) / (2.0 * h);
+    for (varpro::Index j = 0; j < s; ++j)
+      for (varpro::Index i = 0; i < m; ++i)
+        fd(j*m+i,k) = difference(i,j) / (2.0 * h);
   }
   check((fd - evaluation.jacobian).cwiseAbs().maxCoeff() < tolerance, label);
 }
 
 void test_kaufman_jacobians() {
   Vector t(9);
-  for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
+  for (varpro::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
   Vector a(2);
   a << 1.2, 3.7;
   Matrix c(3, 1);
@@ -234,7 +245,7 @@ void test_kaufman_jacobians() {
   x << 1.8, 5.5;
   auto eo = varpro::evaluate(off, x, linear_options, JacobianMode::kaufman);
   const double h = 1e-6;
-  for (Eigen::Index k = 0; k < 2; ++k) {
+  for (varpro::Index k = 0; k < 2; ++k) {
     Vector plus = x, minus = x;
     plus(k) += h;
     minus(k) -= h;
@@ -253,7 +264,7 @@ void test_kaufman_jacobians() {
 
 void test_exact_jacobians() {
   Vector t(9);
-  for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
+  for (varpro::Index i = 0; i < t.size(); ++i) t(i) = i * .6;
   Vector a(2);
   a << 1.2, 3.7;
   Matrix c(3, 1);
@@ -294,26 +305,25 @@ void test_exact_jacobians() {
 
 void test_rank_cases() {
   Vector t(6);
-  for (Eigen::Index i = 0; i < t.size(); ++i) t(i) = static_cast<double>(i);
+  for (varpro::Index i = 0; i < t.size(); ++i) t(i) = static_cast<double>(i);
   Vector x(1);
   x << 2.0;
   Problem deficient;
   deficient.observations.resize(6, 1);
-  for (Eigen::Index i = 0; i < 6; ++i)
+  for (varpro::Index i = 0; i < 6; ++i)
     deficient.observations(i, 0) =
         5.0 * std::exp(-t(i) / 2.0) + (i == 1 ? .2 : 0.0);
   deficient.basis = [t](const Vector& a) {
     Matrix b(t.size(), 2);
-    for (Eigen::Index i = 0; i < t.size(); ++i)
-      b.row(i) << std::exp(-t(i) / a(0)), std::exp(-t(i) / a(0));
+    for (varpro::Index i = 0; i < t.size(); ++i)
+      b(i,0) = b(i,1) = std::exp(-t(i) / a(0));
     return b;
   };
-  deficient.derivative = [t](const Vector& a, Eigen::Index k) {
+  deficient.derivative = [t](const Vector& a, varpro::Index k) {
     Matrix d = Matrix::Zero(t.size(), 2);
     if (k == 0)
-      for (Eigen::Index i = 0; i < t.size(); ++i)
-        d.row(i) << std::exp(-t(i) / a(0)) * t(i) / (a(0) * a(0)),
-            std::exp(-t(i) / a(0)) * t(i) / (a(0) * a(0));
+      for (varpro::Index i = 0; i < t.size(); ++i)
+        d(i,0) = d(i,1) = std::exp(-t(i) / a(0)) * t(i) / (a(0) * a(0));
     return d;
   };
   auto e = varpro::evaluate(deficient, x);
@@ -339,13 +349,13 @@ void test_rank_cases() {
   Vector dc = (d * e.coefficients).col(0);
   const double projection_scale = u.dot(dc);
   Vector expected(6);
-  for (Eigen::Index i = 0; i < expected.size(); ++i)
+  for (varpro::Index i = 0; i < expected.size(); ++i)
     expected(i) = projection_scale * u(i) - dc(i);
   close_matrix(e.jacobian, expected, 2e-10, "deficient range projector");
 
   Problem zero = deficient;
   zero.basis = [](const Vector&) { return Matrix::Zero(6, 2); };
-  zero.derivative = [](const Vector&, Eigen::Index) {
+  zero.derivative = [](const Vector&, varpro::Index) {
     return Matrix::Zero(6, 2);
   };
   auto z = varpro::evaluate(zero, x);
@@ -370,7 +380,7 @@ void test_scale_safe_rank_cutoff() {
     b << 1e308, 0.0;
     return b;
   };
-  p.derivative = [](const Vector&, Eigen::Index) { return Matrix::Zero(2, 1); };
+  p.derivative = [](const Vector&, varpro::Index) { return Matrix::Zero(2, 1); };
   Vector parameters(1);
   parameters << 1.0;
   auto e = varpro::evaluate(p, parameters);
@@ -378,6 +388,33 @@ void test_scale_safe_rank_cutoff() {
   close(e.coefficients(0, 0) * 1e308, 1.0, 1e-12,
         "large-scale minimum-norm solve");
   close_matrix(e.residuals, Matrix::Zero(2, 1), 1e-12, "large-scale residual");
+}
+
+void test_ill_conditioned_and_zero_weights() {
+  Problem p;
+  p.observations = Matrix::Zero(3, 1);
+  p.observations(0, 0) = 1.0;
+  p.observations(1, 0) = 1e-10;
+  p.observations(2, 0) = 1e200;  // A zero weight must remove this row.
+  p.weights = Vector{1.0, 1.0, 0.0};
+  p.basis = [](const Vector&) {
+    Matrix b = Matrix::Zero(3, 2);
+    b(0, 0) = 1.0;
+    b(0, 1) = 1.0;
+    b(1, 1) = 1e-10;
+    b(2, 0) = 1e200;
+    return b;
+  };
+  p.derivative = [](const Vector&, varpro::Index) {
+    return Matrix::Zero(3, 2);
+  };
+  const auto e = varpro::evaluate(p, Vector{1.0});
+  check(e.rank == 2, "ill-conditioned full numerical rank");
+  close(e.coefficients(0,0), 0.0, 2e-5, "ill-conditioned coefficient 0");
+  close(e.coefficients(1,0), 1.0, 2e-5, "ill-conditioned coefficient 1");
+  check(e.residuals.norm() < 1e-12, "zero-weight row and residual");
+  check(e.diagnostics.condition_estimate > 1e10,
+        "ill-conditioned diagnostic");
 }
 
 void test_configurable_rank_cutoff() {
@@ -389,7 +426,7 @@ void test_configurable_rank_cutoff() {
     b << 1.0, 0.0, 0.0, 1e-8;
     return b;
   };
-  p.derivative = [](const Vector&, Eigen::Index) { return Matrix::Zero(2, 2); };
+  p.derivative = [](const Vector&, varpro::Index) { return Matrix::Zero(2, 2); };
   Vector parameters(1);
   parameters << 1.0;
 
@@ -422,18 +459,20 @@ void test_exact_jacobian_with_truncated_rotating_subspace() {
     Matrix rotation(2, 2);
     rotation << c, -s, s, c;
     Matrix diagonal = Matrix::Zero(2, 2);
-    diagonal.diagonal() << 1.0, epsilon;
+    diagonal(0,0) = 1.0;
+    diagonal(1,1) = epsilon;
     Matrix result = rotation * diagonal * rotation.transpose();
     return result;
   };
-  p.derivative = [epsilon](const Vector& parameters, Eigen::Index k) {
+  p.derivative = [epsilon](const Vector& parameters, varpro::Index k) {
     check(k == 0, "rotating-subspace derivative parameter index");
     const double c = std::cos(parameters(0));
     const double s = std::sin(parameters(0));
     Matrix rotation(2, 2);
     rotation << c, -s, s, c;
     Matrix diagonal = Matrix::Zero(2, 2);
-    diagonal.diagonal() << 1.0, epsilon;
+    diagonal(0,0) = 1.0;
+    diagonal(1,1) = epsilon;
     Matrix generator(2, 2);
     generator << 0.0, -1.0, 1.0, 0.0;
     const Matrix basis = rotation * diagonal * rotation.transpose();
@@ -488,30 +527,30 @@ void test_randomized_derivatives_and_invariants() {
   };
 
   for (int case_index = 0; case_index < 24; ++case_index) {
-    const Eigen::Index n = index(1, 4);
-    const Eigen::Index m =
-        (std::max)(n + 3, static_cast<Eigen::Index>(index(6, 12)));
-    const Eigen::Index q = index(1, 3);
-    const Eigen::Index s = index(1, 3);
+    const varpro::Index n = index(1, 4);
+    const varpro::Index m =
+        (std::max)(n + 3, static_cast<varpro::Index>(index(6, 12)));
+    const varpro::Index q = index(1, 3);
+    const varpro::Index s = index(1, 3);
 
     Matrix base(m, n);
     std::vector<Matrix> rates;
-    for (Eigen::Index i = 0; i < m; ++i)
-      for (Eigen::Index j = 0; j < n; ++j) base(i, j) = unit();
-    base.topRows(n) += 2.0 * Matrix::Identity(n, n);
-    for (Eigen::Index k = 0; k < q; ++k) {
+    for (varpro::Index i = 0; i < m; ++i)
+      for (varpro::Index j = 0; j < n; ++j) base(i, j) = unit();
+    for (varpro::Index i = 0; i < n; ++i) base(i,i) += 2.0;
+    for (varpro::Index k = 0; k < q; ++k) {
       Matrix rate(m, n);
-      for (Eigen::Index i = 0; i < m; ++i)
-        for (Eigen::Index j = 0; j < n; ++j) rate(i, j) = 0.3 * unit();
+      for (varpro::Index i = 0; i < m; ++i)
+        for (varpro::Index j = 0; j < n; ++j) rate(i, j) = 0.3 * unit();
       rates.push_back(std::move(rate));
     }
 
     auto basis = [base, rates](const Vector& parameters) {
       Matrix result = base;
-      for (Eigen::Index i = 0; i < result.rows(); ++i) {
-        for (Eigen::Index j = 0; j < result.cols(); ++j) {
+      for (varpro::Index i = 0; i < result.rows(); ++i) {
+        for (varpro::Index j = 0; j < result.cols(); ++j) {
           double exponent = 0.0;
-          for (Eigen::Index k = 0; k < parameters.size(); ++k)
+          for (varpro::Index k = 0; k < parameters.size(); ++k)
             exponent += parameters(k) * rates[k](i, j);
           result(i, j) *= std::exp(exponent);
         }
@@ -522,25 +561,25 @@ void test_randomized_derivatives_and_invariants() {
     Problem problem;
     problem.basis = basis;
     problem.derivative = [basis, rates](const Vector& parameters,
-                                        Eigen::Index k) {
+                                        varpro::Index k) {
       const Matrix evaluated_basis = basis(parameters);
       return Matrix(evaluated_basis.cwiseProduct(rates[k]));
     };
     problem.weights = Vector(m);
-    for (Eigen::Index i = 0; i < m; ++i)
+    for (varpro::Index i = 0; i < m; ++i)
       problem.weights(i) = 1.0 + 0.5 * unit();
 
     Vector truth(q), parameters(q);
-    for (Eigen::Index k = 0; k < q; ++k) {
+    for (varpro::Index k = 0; k < q; ++k) {
       truth(k) = 0.2 * unit();
       parameters(k) = truth(k) + 0.08 * unit();
     }
     Matrix coefficients(n, s);
-    for (Eigen::Index i = 0; i < n; ++i)
-      for (Eigen::Index j = 0; j < s; ++j) coefficients(i, j) = unit();
+    for (varpro::Index i = 0; i < n; ++i)
+      for (varpro::Index j = 0; j < s; ++j) coefficients(i, j) = unit();
     problem.observations = basis(truth) * coefficients;
-    for (Eigen::Index i = 0; i < m; ++i)
-      for (Eigen::Index j = 0; j < s; ++j)
+    for (varpro::Index i = 0; i < m; ++i)
+      for (varpro::Index j = 0; j < s; ++j)
         problem.observations(i, j) += 0.03 * unit();
 
     LinearOptions linear_options;
@@ -553,18 +592,18 @@ void test_randomized_derivatives_and_invariants() {
           "randomized case lost full numerical rank " +
               std::to_string(case_index));
 
-    const Vector residual_vector = Eigen::Map<const Vector>(
-        kaufman.residuals.data(), kaufman.residuals.size());
+    const Vector residual_vector(kaufman.residuals.data(), kaufman.residuals.size());
     Matrix weighted_basis = basis(parameters);
-    for (Eigen::Index i = 0; i < m; ++i)
-      weighted_basis.row(i) *= problem.weights(i);
+    for (varpro::Index i = 0; i < m; ++i)
+      for (varpro::Index j = 0; j < n; ++j)
+        weighted_basis(i,j) *= problem.weights(i);
     const double orthogonality =
         (weighted_basis.transpose() * kaufman.residuals).norm();
     check(orthogonality <=
               1e-10 * (1.0 + weighted_basis.norm() * kaufman.residuals.norm()),
           "randomized residual orthogonality " + std::to_string(case_index));
 
-    for (Eigen::Index k = 0; k < q; ++k) {
+    for (varpro::Index k = 0; k < q; ++k) {
       const double h = 1e-6;
       Vector plus = parameters, minus = parameters;
       plus(k) += h;
@@ -583,8 +622,8 @@ void test_randomized_derivatives_and_invariants() {
           problem, minus, linear_options, JacobianMode::retained_subspace);
       const Matrix finite_difference_matrix =
           (plus_evaluation.residuals - minus_evaluation.residuals) / (2.0 * h);
-      const Vector finite_difference = Eigen::Map<const Vector>(
-          finite_difference_matrix.data(), finite_difference_matrix.size());
+      const Vector finite_difference(finite_difference_matrix.data(),
+                                     finite_difference_matrix.size());
       const double jacobian_error =
           (exact.jacobian.col(k) - finite_difference).norm() /
           (1.0 + finite_difference.norm());
@@ -631,7 +670,7 @@ void expect_domain(F&& f, const std::string& name) {
 
 void test_errors_and_limit() {
   Vector t(5);
-  for (Eigen::Index i = 0; i < 5; ++i) t(i) = static_cast<double>(i);
+  for (varpro::Index i = 0; i < 5; ++i) t(i) = static_cast<double>(i);
   Vector truth(2);
   truth << 1.0, 3.0;
   Matrix truth_coefficients(3, 1);
@@ -674,7 +713,7 @@ void test_errors_and_limit() {
   };
   expect_domain([&] { varpro::evaluate(nan_basis, a); }, "nonfinite basis");
   Problem nan_derivative = p;
-  nan_derivative.derivative = [](const Vector&, Eigen::Index) {
+  nan_derivative.derivative = [](const Vector&, varpro::Index) {
     return Matrix::Constant(5, 3, std::numeric_limits<double>::quiet_NaN());
   };
   expect_domain([&] { varpro::evaluate(nan_derivative, a); },
@@ -721,6 +760,7 @@ int main() {
       {"retained-subspace Jacobians", test_exact_jacobians},
       {"rank deficient and rank zero", test_rank_cases},
       {"scale-safe rank cutoff", test_scale_safe_rank_cutoff},
+      {"ill-conditioned and zero-weight rows", test_ill_conditioned_and_zero_weights},
       {"configurable rank cutoff", test_configurable_rank_cutoff},
       {"retained-subspace Jacobian with truncated rotating subspace",
        test_exact_jacobian_with_truncated_rotating_subspace},
@@ -729,6 +769,14 @@ int main() {
       {"errors and evaluation limit", test_errors_and_limit},
   };
   int failures = 0;
+  try {
+    close(header_only_other_translation_unit(), 1.0, 1e-12,
+          "header-only multiple translation units");
+    std::cout << "[PASS] header-only multiple translation units\n";
+  } catch (const std::exception& e) {
+    ++failures;
+    std::cerr << "[FAIL] header-only multiple translation units: " << e.what() << '\n';
+  }
   for (const auto& test : tests) {
     try {
       test.second();
