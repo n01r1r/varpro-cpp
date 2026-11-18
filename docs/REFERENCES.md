@@ -19,7 +19,7 @@ The implementation follows the mathematical presentation in:
   problems](https://doi.org/10.1007/s10589-012-9492-9)
 
 The archived README contains the original crate's additional citations and
-acknowledgements. The maintained implementation uses Eigen's SVD and bundled
-Levenberg-Marquardt module, while exposing a deliberately smaller C++ API.
+acknowledgements. The maintained implementation uses a dependency-free,
+one-sided Jacobi SVD and an internal Levenberg–Marquardt solver.
 The Rust, MATLAB, Python, benchmark, and Rust-specific test files from the
 reference checkout are not part of this maintained C++ codebase.
