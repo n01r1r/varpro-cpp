@@ -8,7 +8,9 @@ definitions are `inline`, so the header can be included in multiple
 translation units without one-definition-rule conflicts.
 
 The public matrix and vector are compact value types. Matrix storage is
-column-major; comma initialization is row-major. The `Problem` callbacks
+column-major; comma initialization is row-major. Vector normalization scales
+the entries before computing their norm and rejects zero or nonfinite input.
+The `Problem` callbacks
 take `Vector` and return `Matrix` by value. Their types and code do not
 require Eigen.
 
@@ -29,6 +31,8 @@ coefficients, $R=B$, and a zero Jacobian.
 ## Numerics
 
 - **SVD:** one-sided Jacobi on the globally scaled matrix $A/a_{max}$.
+  Pairwise dot products use independently scaled columns to keep their norms
+  and correlation computable even when the column magnitudes differ widely.
   Rotation orthogonalizes columns and accumulates right singular vectors.
   The resulting singular values are sorted descending, then rescaled. The
   zero matrix is handled without division. Failure to converge is reported.
@@ -44,10 +48,13 @@ coefficients, $R=B$, and a zero Jacobian.
   \approx \begin{bmatrix}-r\\0\end{bmatrix}.
   $$
 
-  Trial acceptance uses actual-to-predicted cost reduction. Damping increases
-  after rejection and decreases after a successful step. The scaled step is
-  limited to $\|\delta_i/(1+|\alpha_i|)\|_2\le 1/2$ to prevent jumps far
-  outside the local linear model.
+  The solver scales $J$ and $r$ by a common factor before forming the LM
+  model. The parameter step is limited to
+  $\|\delta_i/(1+|\alpha_i|)\|_2\le 1/2$ to keep trials local. The predicted
+  decrease is $-g^T\delta - \tfrac12\|J\delta\|_2^2$ at that limited step.
+  Trial acceptance requires an actual decrease and a positive predicted
+  decrease. Damping increases after rejection and uses the ratio of actual
+  to predicted decrease after acceptance.
 - **Termination:** `gtol` checks a normalized Jacobian/residual cosine,
   `xtol` checks the parameter step, `ftol` checks accepted relative cost
   reduction. Evaluation budget counts the initial and each trial residual;

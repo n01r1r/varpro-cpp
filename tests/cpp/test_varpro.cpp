@@ -417,6 +417,67 @@ void test_ill_conditioned_and_zero_weights() {
         "ill-conditioned diagnostic");
 }
 
+void test_jacobi_columns_with_underflowing_squares() {
+  Problem p;
+  p.observations = Vector{0.0, 1.0};
+  p.basis = [](const Vector&) {
+    Matrix a(2, 2);
+    a << 1.0, 1e-180, 0.0, 1e-180;
+    return a;
+  };
+  p.derivative = [](const Vector&, varpro::Index) { return Matrix::Zero(2, 2); };
+  LinearOptions options;
+  options.rcond = 0.0;
+  const auto result = varpro::evaluate(p, Vector{0.0}, options);
+  check(result.rank == 2, "both nonzero singular values are retained");
+  close(result.coefficients(0, 0), -1.0, 1e-12, "large-column coefficient");
+  close(result.coefficients(1, 0) * 1e-180, 1.0, 1e-12, "small-column coefficient");
+  close(result.residuals.norm(), 0.0, 1e-12, "full-rank residual");
+}
+
+void test_fit_observation_scaling() {
+  Problem p;
+  p.basis = [](const Vector& x) { return Matrix(Vector{1.0, x(0)}); };
+  p.derivative = [](const Vector&, varpro::Index) {
+    return Matrix(Vector{0.0, 1.0});
+  };
+  for (double scale : {1.0, 1e-30, 1e-180}) {
+    p.observations = Vector{scale, scale};
+    const auto result = varpro::fit(p, Vector{0.0});
+    check(result.converged(), "scaled fit converges");
+    check(result.function_evaluations > 1, "scaled fit takes a trial step");
+    close(result.parameters(0), 1.0, 1e-10, "scaled fit parameter");
+    close(result.evaluation.residuals.norm() / scale, 0.0, 1e-10,
+          "scaled fit relative residual");
+  }
+}
+
+void test_clipped_lm_model_reduction() {
+  Matrix jac(2, 2);
+  jac << 2.0, 0.0, 0.0, 1.0;
+  const Matrix residuals = Vector{-4.0, 0.0};
+  const Vector gradient{-8.0, 0.0};
+  Vector step = varpro::detail::damped_step(jac, residuals, Vector{4.0, 1.0}, 1.0);
+  check(step.norm() > 0.5, "test step exceeds the trust radius");
+  step *= 0.5 / step.norm();
+  const double direct_decrease =
+      0.5 * (residuals.squaredNorm() - (residuals + jac * step).squaredNorm());
+  close(varpro::detail::predicted_reduction(jac, gradient, step), direct_decrease,
+        1e-14, "quadratic model decrease at the clipped step");
+}
+
+void test_normalize_extreme_values() {
+  const double large = (std::numeric_limits<double>::max)();
+  const double small = std::numeric_limits<double>::denorm_min();
+  for (double magnitude : {large, small}) {
+    Vector v{magnitude, -magnitude};
+    v.normalize();
+    close(v(0), std::sqrt(0.5), 1e-15, "normalized positive component");
+    close(v(1), -std::sqrt(0.5), 1e-15, "normalized negative component");
+    close(v.norm(), 1.0, 1e-15, "normalized vector has unit norm");
+  }
+}
+
 void test_configurable_rank_cutoff() {
   Problem p;
   p.observations.resize(2, 1);
@@ -761,6 +822,10 @@ int main() {
       {"rank deficient and rank zero", test_rank_cases},
       {"scale-safe rank cutoff", test_scale_safe_rank_cutoff},
       {"ill-conditioned and zero-weight rows", test_ill_conditioned_and_zero_weights},
+      {"Jacobi columns with underflowing squares", test_jacobi_columns_with_underflowing_squares},
+      {"fit observation scaling", test_fit_observation_scaling},
+      {"clipped LM model reduction", test_clipped_lm_model_reduction},
+      {"normalize extreme values", test_normalize_extreme_values},
       {"configurable rank cutoff", test_configurable_rank_cutoff},
       {"retained-subspace Jacobian with truncated rotating subspace",
        test_exact_jacobian_with_truncated_rotating_subspace},

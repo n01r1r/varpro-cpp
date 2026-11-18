@@ -72,8 +72,12 @@ class Vector {
   }
   Vector cwiseAbs() const { Vector r = *this; for (double& v : r.v_) v = std::abs(v); return r; }
   void normalize() {
+    if (!allFinite()) throw std::domain_error("nonfinite vector cannot be normalized");
+    double scale = 0.0;
+    for (double v : v_) scale = (std::max)(scale, std::abs(v));
+    if (scale == 0.0) throw std::domain_error("zero vector cannot be normalized");
+    for (double& v : v_) v /= scale;
     const double n = norm();
-    if (!(n > 0)) throw std::domain_error("zero vector cannot be normalized");
     for (double& v : v_) v /= n;
   }
   Vector& operator+=(const Vector& b) { if (size() != b.size()) throw std::invalid_argument("vector shape mismatch"); for (Index i = 0; i < size(); ++i) (*this)(i) += b(i); return *this; }
@@ -563,18 +567,33 @@ inline SVD thin_svd(const Matrix& a) {
   for (Index sweep = 0; sweep < max_sweeps; ++sweep) {
     changed = false;
     for (Index p = 0; p < n; ++p) for (Index q = p + 1; q < n; ++q) {
+      // Normalize the two columns independently before forming their dot products.
+      double p_scale = 0, q_scale = 0;
+      for (Index i = 0; i < m; ++i) {
+        p_scale = (std::max)(p_scale, std::abs(b(i,p)));
+        q_scale = (std::max)(q_scale, std::abs(b(i,q)));
+      }
+      if (p_scale == 0 || q_scale == 0) continue;
       double aa = 0, bb = 0, ab = 0;
       for (Index i = 0; i < m; ++i) {
-        aa += b(i,p) * b(i,p);
-        bb += b(i,q) * b(i,q);
-        ab += b(i,p) * b(i,q);
+        const double x = b(i,p) / p_scale, y = b(i,q) / q_scale;
+        aa += x * x;
+        bb += y * y;
+        ab += x * y;
       }
-      if (aa == 0 || bb == 0 || std::abs(ab) <= epsilon * std::sqrt(aa) * std::sqrt(bb))
-        continue;
+      const double p_unit_norm = std::sqrt(aa), q_unit_norm = std::sqrt(bb);
+      const double correlation = (ab / p_unit_norm) / q_unit_norm;
+      if (std::abs(correlation) <= epsilon) continue;
+      const double p_norm = p_scale * p_unit_norm, q_norm = q_scale * q_unit_norm;
+      const double ratio = (std::min)(p_norm, q_norm) / (std::max)(p_norm, q_norm);
+      const double difference = std::copysign(1.0 - ratio * ratio, q_norm - p_norm);
+      const double twice_cross = 2.0 * correlation * ratio;
+      if (twice_cross == 0.0) continue;
+      // Equivalent to the Jacobi tangent with (bb-aa)/(2*ab), without overflow.
+      const double t = twice_cross /
+                       (difference + std::copysign(std::hypot(difference, twice_cross),
+                                                   difference));
       changed = true;
-      const double tau = (bb - aa) / (2.0 * ab);
-      const double t = std::copysign(1.0, tau) /
-                       (std::abs(tau) + std::hypot(1.0, tau));
       const double c = 1.0 / std::hypot(1.0, t), s = t * c;
       for (Index i = 0; i < m; ++i) {
         const double x = b(i,p), y = b(i,q);
@@ -750,6 +769,11 @@ inline Vector damped_step(const Matrix& jac, const Matrix& residuals,
   return step;
 }
 
+inline double predicted_reduction(const Matrix& jac, const Vector& gradient,
+                                  const Vector& step) {
+  return -gradient.dot(step) - 0.5 * (jac * step).squaredNorm();
+}
+
 }  // namespace detail
 
 inline FitResult fit(const Problem& p, Vector initial, const Options& options) {
@@ -777,14 +801,25 @@ inline FitResult fit(const Problem& p, Vector initial, const Options& options) {
   for (long long attempts = 0;
        attempts < (std::max)(100LL, 20LL * options.max_evaluations);
        ++attempts) {
-    const Matrix jac = detail::jacobian(p, x, prepared, options.jacobian_mode);
-    const double f = 0.5 * prepared.residuals.squaredNorm();
-    const double norm_r = prepared.residuals.norm();
+    Matrix jac = detail::jacobian(p, x, prepared, options.jacobian_mode);
+    double norm_r = prepared.residuals.norm();
+    if (norm_r == 0) {
+      result.status = Status::converged;
+      break;
+    }
+    // A common scale preserves the LM model and keeps its quadratic terms
+    // representable when the entire objective is scaled up or down.
+    double scale = norm_r;
+    for (Index i = 0; i < jac.size(); ++i)
+      scale = (std::max)(scale, std::abs(jac.data()[i]));
+    jac /= scale;
+    const Matrix residuals = prepared.residuals / scale;
+    norm_r /= scale;
     Vector gradient(q), diagonal(q);
     double max_diag = 0, max_cosine = 0;
     for (Index k = 0; k < q; ++k) {
       for (Index i = 0; i < m*s; ++i) {
-        gradient(k) += jac(i,k) * prepared.residuals.data()[i];
+        gradient(k) += jac(i,k) * residuals.data()[i];
         diagonal(k) += jac(i,k) * jac(i,k);
       }
       max_diag = (std::max)(max_diag, diagonal(k));
@@ -794,14 +829,14 @@ inline FitResult fit(const Problem& p, Vector initial, const Options& options) {
     }
     if (!gradient.allFinite() || !diagonal.allFinite())
       throw std::domain_error("LM normal equations are nonfinite");
-    if (norm_r == 0 || max_cosine <= options.gtol) {
+    if (max_cosine <= options.gtol) {
       result.status = Status::converged;
       break;
     }
     if (result.function_evaluations >= options.max_evaluations) break;
-    const double floor = (std::max)(1e-30, max_diag * 1e-12);
+    const double floor = max_diag * 1e-12;
     for (Index k = 0; k < q; ++k) diagonal(k) = (std::max)(diagonal(k), floor);
-    Vector step = detail::damped_step(jac, prepared.residuals, diagonal, lambda);
+    Vector step = detail::damped_step(jac, residuals, diagonal, lambda);
     // A relative trust region prevents an otherwise valid decrease from
     // taking an enormous step into a different, ill-conditioned basin.
     double relative_step = 0;
@@ -816,20 +851,20 @@ inline FitResult fit(const Problem& p, Vector initial, const Options& options) {
     ++result.function_evaluations;
     detail::Prepared next = detail::prepare(p, trial, options.linear_options,
                                             basis_width, &weighted_y);
-    const double next_f = 0.5 * next.residuals.squaredNorm();
-    double predicted = 0;
-    for (Index k = 0; k < q; ++k)
-      predicted += step(k) * (lambda * diagonal(k) * step(k) - gradient(k));
-    predicted *= 0.5;
-    const double ratio = predicted > 0 ? (f - next_f) / predicted : -1.0;
-    if (ratio > 0 && next_f < f) {
+    const double next_norm = next.residuals.norm() / scale;
+    const double predicted = detail::predicted_reduction(jac, gradient, step);
+    if (predicted > 0 && next_norm < norm_r) {
+      const double relative_decrease =
+          ((norm_r - next_norm) / norm_r) * (1.0 + next_norm / norm_r);
+      const double reduction = 0.5 * (norm_r - next_norm) * (norm_r + next_norm);
+      const double ratio = reduction / predicted;
       x = std::move(trial);
       prepared = std::move(next);
       ++result.iterations;
       lambda *= (std::max)(1.0/3.0, 1.0 - std::pow(2.0*ratio-1.0, 3.0));
       lambda = (std::max)(lambda, 1e-30);
       nu = 2.0;
-      if (f - next_f <= options.ftol * f) {
+      if (relative_decrease <= options.ftol) {
         result.status = Status::converged;
         break;
       }
